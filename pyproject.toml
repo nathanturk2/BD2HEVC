@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bd2hevc"
+version = "0.1.0"
+description = "Full-disc Blu-ray HEVC conversion while preserving menus, extras, audio, subtitles, and VLC-friendly playback."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0-only" }
+authors = [
+  { name = "BD2HEVC contributors" }
+]
+keywords = ["blu-ray", "bdmv", "hevc", "nvenc", "vlc", "libbluray"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video :: Conversion"
+]
+
+[project.scripts]
+bd2hevc = "bd2hevc_app.cli:main"
+
+[tool.setuptools]
+py-modules = ["bd_to_uhdbd", "bd2hevc"]
+packages = ["bd2hevc_app"]

@@ -1,0 +1,202 @@
+﻿import argparse
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from bd2hevc_app import core as bd
+from bd2hevc_app import bdj, bitrate, config, encoding, muxing, navigation, output, progress, queueing, repair, scan, tools, validation
+
+
+class ModuleSplitTests(unittest.TestCase):
+    def test_public_modules_import_core_helpers(self) -> None:
+        self.assertEqual(config.VERSION, bd.VERSION)
+        self.assertIs(bitrate.equivalent_hevc_bitrate, bd.equivalent_hevc_bitrate)
+        self.assertIs(tools.discover_tools, bd.discover_tools)
+        self.assertIs(scan.inspect_clip, bd.inspect_clip)
+        self.assertIs(validation.validate_clip, bd.validate_clip)
+        self.assertIs(output.copy_disc_tree_skipping_reencoded_streams, bd.copy_disc_tree_skipping_reencoded_streams)
+        self.assertIs(progress.progress_event, bd.progress_event)
+        self.assertIs(queueing.job_paths, bd.job_paths)
+        self.assertIs(queueing.cmd_status, bd.cmd_status)
+        self.assertIs(bdj.patch_known_bdj_compatibility, bd.patch_known_bdj_compatibility)
+        self.assertIs(bdj.patch_bluray_vlc_menu, bd.patch_bluray_vlc_menu)
+        self.assertIs(encoding.encode_to_hevc_m2ts, bd.encode_to_hevc_m2ts)
+        self.assertIs(muxing.author_m2ts_split, bd.author_m2ts_split)
+        self.assertIs(muxing.write_tsmuxer_meta, bd.write_tsmuxer_meta)
+        self.assertIs(navigation.patch_navigation_for_hevc, bd.patch_navigation_for_hevc)
+        self.assertIs(navigation.restore_source_clpi, bd.restore_source_clpi)
+        self.assertIs(repair.select_output_repair_clips, bd.select_output_repair_clips)
+        self.assertIs(repair.reencode_replacement_clip, bd.reencode_replacement_clip)
+        self.assertIs(progress.fit_terminal_line, bd.fit_terminal_line)
+
+    def test_watch_lines_are_truncated_to_terminal_width(self) -> None:
+        line = "Log: " + ("x" * 120)
+        fitted = progress.fit_terminal_line(line, 40)
+        self.assertLessEqual(len(fitted), 40)
+        self.assertTrue(fitted.endswith("..."))
+
+    def test_progress_markers_after_carriage_returns_are_counted(self) -> None:
+        with TemporaryDirectory() as temp:
+            log = Path(temp) / "job.log"
+            log.write_text(
+                "frame= 100 time=00:00:04.00    \rBD2HEVC_PROGRESS validate-done 00000.m2ts\r\n"
+                "frame= 200 time=00:00:08.00    \rBD2HEVC_PROGRESS validate-done 00001.m2ts\r\n",
+                encoding="utf-8",
+            )
+            state = progress.latest_log_progress(log)
+            self.assertEqual(state["done_files"], ["00000.m2ts", "00001.m2ts"])
+
+
+class BitratePresetTests(unittest.TestCase):
+    def test_compact_cq_uses_cq_over_default_cutoff(self) -> None:
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=12_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=11 * 60,
+            source_codec="h264",
+            mode="compact-cq",
+        )
+        self.assertEqual(plan["rate_control"], "cq")
+        self.assertEqual(plan["cq"], 18)
+
+    def test_compact_cq_uses_smaller_for_short_clips(self) -> None:
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=12_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=9 * 60,
+            source_codec="h264",
+            mode="compact-cq",
+        )
+        self.assertEqual(plan["rate_control"], "vbr")
+        self.assertEqual(plan["fallback_bitrate_mode"], "smaller")
+
+
+class CopyPlanningTests(unittest.TestCase):
+    def test_preservation_copy_skips_only_reencoded_streams(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "src"
+            output = root / "out"
+            stream = source / "BDMV" / "STREAM"
+            playlist = source / "BDMV" / "PLAYLIST"
+            stream.mkdir(parents=True)
+            playlist.mkdir(parents=True)
+            (stream / "00000.m2ts").write_bytes(b"replace")
+            (stream / "00001.m2ts").write_bytes(b"copy")
+            (playlist / "00000.mpls").write_bytes(b"playlist")
+
+            report = bd.copy_disc_tree_skipping_reencoded_streams(source, output, {"00000.m2ts"})
+
+            self.assertFalse((output / "BDMV" / "STREAM" / "00000.m2ts").exists())
+            self.assertEqual((output / "BDMV" / "STREAM" / "00001.m2ts").read_bytes(), b"copy")
+            self.assertEqual((output / "BDMV" / "PLAYLIST" / "00000.mpls").read_bytes(), b"playlist")
+            self.assertEqual(report["skipped_reencode_stream_files"], 1)
+
+    def test_missing_output_drive_is_reported_before_background_start(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "src"
+            source.mkdir()
+            missing = Path("Z:/bd2hevc_missing_drive_test")
+            if missing.anchor and not Path(missing.anchor).exists():
+                with self.assertRaisesRegex(bd.ToolError, "Output drive or root does not exist"):
+                    bd.make_output_available(missing, source, force=False)
+
+
+class CommandConstructionTests(unittest.TestCase):
+    def test_compact_cq_nvenc_uses_lean_handbrake_like_cq(self) -> None:
+        clip_info = {
+            "video": {
+                "fps": 23.976,
+                "target_hevc": {
+                    "mode": "compact-cq",
+                    "rate_control": "cq",
+                    "cq": 18,
+                    "maxrate_bps": 80_000_000,
+                    "bufsize_bps": 160_000_000,
+                },
+            }
+        }
+        cmd = bd.encode_to_hevc_m2ts(
+            Path("in.m2ts"),
+            Path("out.m2ts"),
+            clip_info,
+            {"ffmpeg": "ffmpeg"},
+            dry_run=True,
+        )
+        self.assertIn("-cq", cmd)
+        self.assertIn("18", cmd)
+        self.assertNotIn("-spatial-aq", cmd)
+        self.assertNotIn("-temporal-aq", cmd)
+        self.assertNotIn("-maxrate:v:0", cmd)
+        self.assertNotIn("-bufsize:v:0", cmd)
+        self.assertNotIn("-bluray-compat", cmd)
+
+    def test_background_command_carries_compact_cq_cutoff(self) -> None:
+        args = argparse.Namespace(
+            source="Disc",
+            fast_bitrate=False,
+            force_encode=False,
+            force=False,
+            makemkv=False,
+            no_makemkv=False,
+            require_makemkv=False,
+            no_patch_navigation=False,
+            no_bdj_compatibility_patches=False,
+            no_encode_ahead=False,
+            verbose=False,
+            hevc_bit_depth=8,
+            encoder="hevc_nvenc",
+            encode_ahead_depth=3,
+            bitrate_mode="compact-cq",
+            hevc_bitrate_factor=None,
+            min_video_bitrate=2_000_000,
+            max_video_bitrate=80_000_000,
+            maxrate_multiplier=1.55,
+            bufsize_multiplier=2.0,
+            anime_cq_min_duration=12 * 60.0,
+            vlc_compat=bd.DEFAULT_VLC_COMPATIBILITY_MODE,
+            vlc_fix=[],
+            compat_patch_file=[],
+            decode_sample=30.0,
+        )
+        cmd = bd.auto_command_for_job(args, Path("out"), Path("report.json"))
+        self.assertIn("--bitrate-mode", cmd)
+        self.assertIn("compact-cq", cmd)
+        self.assertIn("--compact-cq-min-duration", cmd)
+        self.assertIn("720.0", cmd)
+
+    def test_legacy_anime_cq18_alias_still_maps_to_compact_cq(self) -> None:
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=12_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=11 * 60,
+            source_codec="h264",
+            mode="anime-cq18",
+        )
+        self.assertEqual(plan["mode"], "compact-cq")
+        self.assertEqual(plan["rate_control"], "cq")
+
+    def test_legacy_episode_compact_alias_still_maps_to_compact_cq(self) -> None:
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=12_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=11 * 60,
+            source_codec="h264",
+            mode="episode-compact",
+        )
+        self.assertEqual(plan["mode"], "compact-cq")
+        self.assertEqual(plan["rate_control"], "cq")
+
+
+if __name__ == "__main__":
+    unittest.main()
+

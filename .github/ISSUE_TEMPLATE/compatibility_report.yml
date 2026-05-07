@@ -1,0 +1,51 @@
+name: Disc compatibility report
+description: Share a successful or failed compatibility result for a backup you own.
+title: "[Compat]: "
+labels: ["compatibility"]
+body:
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This is about a local, unencrypted BDMV folder backup.
+          required: true
+        - label: I am not sharing copyrighted disc files, keys, or decryption instructions.
+          required: true
+  - type: input
+    id: disc
+    attributes:
+      label: Disc/title
+      description: Name the disc or describe it generally if you prefer.
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works
+        - Mostly works
+        - Broken
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow
+      description: Include command, bitrate preset, encoder, and whether VLC compatibility fixes or MakeMKV validation were enabled.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: playback
+    attributes:
+      label: Playback observations
+      description: Mention VLC/libbluray version, menus, extras, galleries, games, audio, subtitles, and seeking/progress behavior.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation output
+      description: Paste concise validation output or attach redacted reports.
+      render: text

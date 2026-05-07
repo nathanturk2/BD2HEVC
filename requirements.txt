@@ -1,0 +1,8 @@
+# BD2HEVC currently uses only the Python standard library.
+#
+# External command-line tools are required at runtime:
+# - FFmpeg / FFprobe
+# - tsMuxeR
+# Optional:
+# - VLC, for smoke tests
+# - MakeMKV CLI, for title scanning/validation

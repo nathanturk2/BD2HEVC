@@ -1,0 +1,407 @@
+# BD2HEVC
+
+BD2HEVC converts local, unencrypted Blu-ray folder backups to HEVC while keeping
+the full-disc experience: menus, extras, playlists, BD-J files, audio, subtitles,
+chapters, and navigation metadata.
+
+The goal is a smaller backup that still behaves like the original disc in
+VLC/libbluray. BD2HEVC does not decrypt discs, does not include keys, and does
+not upscale video. The normal full-disc workflow keeps 1080p sources at 1080p
+and reencodes video clips longer than 10 seconds to 8-bit HEVC Main.
+
+License: GPL-3.0-only.
+
+BD2HEVC is a reencoding and preservation tool for backups you already have. It
+does not decrypt discs, bypass copy protection, provide keys, download media, or
+include copyrighted disc assets.
+
+Project status: alpha. The current structure is ready for initial public
+testing, with low-level encoding, muxing, navigation metadata, BD-J
+compatibility, queueing, validation, and repair code split into focused modules.
+Disc compatibility should still be treated as community-tested rather than
+guaranteed.
+
+## Quick Start
+
+Check that BD2HEVC can see the tools it needs:
+
+```bash
+python bd2hevc.py tools
+```
+
+Convert in the foreground:
+
+```bash
+python bd2hevc.py auto "MY_DISC_BACKUP"
+```
+
+Convert to a specific collection folder:
+
+```bash
+python bd2hevc.py auto "MY_DISC_BACKUP" "Converted UHD-BD/My Disc (BD) (UHD converted)"
+```
+
+Preview what would be reencoded without writing an output:
+
+```bash
+python bd2hevc.py auto "MY_DISC_BACKUP" --dry-run
+```
+
+The foreground command prints progress automatically and ends with a short
+summary such as the output path, number of clips reencoded, and validation
+status. Use `--report reports/name.json` when you want the full machine-readable
+JSON report saved as well.
+
+BD2HEVC targets HEVC/H.265 regardless of encoder. The tested default is
+`--encoder hevc_nvenc`, and you can also select `hevc_qsv`, `hevc_amf`, or
+`libx265` when your FFmpeg build supports them. Full-disc conversion uses a
+small encode-to-mux queue for hardware HEVC encoders: one clip encodes while the
+single muxer finishes earlier clips. CPU `libx265` stays serial. Use
+`--no-encode-ahead` to disable that pipeline even with hardware encoding, or
+`--encode-ahead-depth 1` to allow only one completed encode to wait for muxing.
+
+## Background Jobs
+
+For long conversions, use `start`. It creates the dry-run plan, queues the real
+conversion in the background, and prints the exact status commands to use.
+Background jobs run one at a time so multiple conversions do not fight over
+NVENC, disk I/O, or the same validation tools.
+
+```bash
+python bd2hevc.py start "MY_DISC_BACKUP" "Converted UHD-BD/My Disc (BD) (UHD converted)"
+```
+
+Check the newest job:
+
+```bash
+python bd2hevc.py status
+```
+
+`status` reports duration-weighted overall progress, so a long movie clip counts
+by how far that clip has encoded/remuxed rather than only as "one clip not done."
+
+Watch the whole queue until all currently running or queued jobs finish:
+
+```bash
+python bd2hevc.py status --watch
+```
+
+Watch a specific job until it finishes:
+
+```bash
+python bd2hevc.py status 20260429-153012-MY_DISC_BACKUP --watch
+```
+
+In an interactive terminal, `--watch` redraws the same status block in place
+instead of appending a new progress bar every refresh. With no number it refreshes
+once per second. Add a number to choose another interval, for example
+`--watch 10`.
+
+List recent jobs:
+
+```bash
+python bd2hevc.py jobs
+```
+
+Pause the queue after the current running conversion:
+
+```bash
+python bd2hevc.py pause-queue
+```
+
+Resume queued jobs:
+
+```bash
+python bd2hevc.py resume-queue
+```
+
+Cancel or remove a queued job:
+
+```bash
+python bd2hevc.py cancel 20260429-153012-MY_DISC_BACKUP
+python bd2hevc.py remove 20260429-153012-MY_DISC_BACKUP
+```
+
+Stopping an already-running conversion is intentionally explicit:
+
+```bash
+python bd2hevc.py cancel 20260429-153012-MY_DISC_BACKUP --kill
+```
+
+Queue several conversions in one command:
+
+```bash
+python bd2hevc.py queue "Disc 1" "Disc 2" "Disc 3" --output-dir "Converted UHD-BD"
+```
+
+You can also point `queue` at a parent folder containing multiple BDMV backup
+folders:
+
+```bash
+python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
+```
+
+Job files, logs, plans, and full reports are written under `reports/jobs/`.
+The final converted disc is written to the output folder shown by `start`.
+
+## VLC Compatibility Fixes
+
+BD2HEVC defaults to `--vlc-compat auto`: it keeps the source disc structure, then
+applies narrow known fixes for VLC/libbluray quirks when the converter can
+recognize the affected BD-J bytecode.
+
+For the closest possible copy of the source BD-J, disable those optional fixes:
+
+```bash
+python bd2hevc.py auto "Disc" "Converted UHD-BD/Disc (BD) (UHD converted)" --vlc-compat off
+```
+
+Apply compatibility fixes to an existing converted output:
+
+```bash
+python bd2hevc.py patch-vlc-compat "Converted UHD-BD/Disc (BD) (UHD converted)"
+```
+
+The built-in fix can also be selected explicitly:
+
+```bash
+python bd2hevc.py auto "Disc" --vlc-fix topmenu-mark-zero-on-return
+```
+
+For matching BlueMoon-style BD-J menus, `topmenu-mark-zero-on-return` handles
+discs where VLC/libbluray returns to a top-menu playlist at a positive playmark
+and the disc app never redraws the menu overlay. It normalizes that top-menu
+return to the menu entry point so normal mark events and BD-J graphics updates
+fire again.
+
+Advanced users can supply JSON patch files with `--compat-patch-file`. The
+current custom format supports JAR entry patching with `replace_hex` and
+`replace_method_call` operations, while preserving backups of edited JARs.
+
+## Normal Validation
+
+Validate an output against its source:
+
+```bash
+python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --reference "MY_DISC_BACKUP"
+```
+
+Skip MakeMKV if it is not installed or you only want FFprobe/decode checks:
+
+```bash
+python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --reference "MY_DISC_BACKUP" --no-makemkv
+```
+
+Save the full validation report:
+
+```bash
+python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --reference "MY_DISC_BACKUP" --report reports/my_disc.validate.json
+```
+
+## Requirements
+
+Required:
+
+- Python 3.10+
+- FFmpeg and FFprobe with `hevc_nvenc`
+- NVIDIA GPU/driver capable of NVENC HEVC
+- tsMuxer 2.7 or newer
+
+Optional but recommended:
+
+- MakeMKV CLI (`makemkvcon` or `makemkvcon64`) for optional title scanning and
+  structural validation
+- VLC for headless playback smoke tests
+
+BD2HEVC expects already-decrypted, local `BDMV` folder backups. It does not
+bypass copy protection.
+
+By default, full-disc folder conversion does not call MakeMKV. This keeps BD2HEVC
+from waking or probing physical optical drives while you are using MakeMKV or
+another program to create a backup from a disc. Opt in when you specifically want
+that extra title scan:
+
+```bash
+python bd2hevc.py auto "Disc" --makemkv
+python bd2hevc.py validate "Converted UHD-BD/Disc (BD) (UHD converted)" --makemkv
+```
+
+## Installing Tools
+
+Windows:
+
+- FFmpeg can be installed with winget or another package manager.
+- MakeMKV is auto-detected from common Windows install folders.
+- tsMuxer is auto-detected from `tools\tsmuxer-2.7.0\tsMuxeR.exe`.
+- VLC is auto-detected from common Windows install folders.
+
+Linux:
+
+- Put `ffmpeg`, `ffprobe`, `tsmuxer` or `tsMuxeR`, `makemkvcon`, and `vlc` on
+  `PATH`.
+- Make sure your FFmpeg build lists `hevc_nvenc`:
+
+```bash
+ffmpeg -hide_banner -encoders | grep hevc_nvenc
+```
+
+Optional editable install:
+
+```bash
+python -m pip install -e .
+bd2hevc tools
+```
+
+## What It Changes
+
+- Copies the full source backup structure.
+- Reencodes video clips longer than 10 seconds to HEVC.
+- Passes audio and PGS subtitle streams through unchanged.
+- Keeps source resolution. No upscaling is done by `auto`.
+- Patches CLPI/MPLS video descriptors so replacement clips are described as
+  HEVC.
+- Adjusts CLPI packet maps so VLC/libbluray does not follow stale packet
+  positions from the larger source streams.
+- Generates missing disc-library metadata so VLC shows a normal title instead
+  of a long `bluray:///...` path.
+- Applies known narrow BD-J compatibility fixes where BD2HEVC has an automated,
+  disc-specific safe patch and `--vlc-compat` is enabled.
+
+## Bitrate Controls
+
+The default `balanced` mode estimates the HEVC target from the source video-only
+bitrate, resolution, frame rate, and source codec. Audio bitrate is ignored so
+passthrough audio does not inflate the video target.
+
+MPEG-2 sources get codec-aware bitrate handling. When FFprobe reports a Blu-ray
+MPEG-2 CPB ceiling instead of the actual clip bitrate, BD2HEVC falls back to the
+container bitrate minus known audio. The 10-second rule still applies: MPEG-2
+clips at or below 10 seconds are copied.
+
+Presets:
+
+```bash
+python bd2hevc.py auto "Disc" --bitrate-mode smaller
+python bd2hevc.py auto "Disc" --bitrate-mode balanced
+python bd2hevc.py auto "Disc" --bitrate-mode transparent
+python bd2hevc.py auto "Disc" --bitrate-mode source-ratio
+python bd2hevc.py auto "Disc" --bitrate-mode compact-cq
+```
+
+`compact-cq` is intended for space-focused conversions where CQ 18 is preferred
+over the source-equivalent bitrate curve. It is useful for multi-episode/anime
+discs and can also make high-bitrate movie discs substantially smaller than the
+balanced preset.
+Clips at least 10 minutes long use HEVC CQ 18, while shorter clips that still
+need reencoding use the `smaller` bitrate curve. With `hevc_nvenc`, long
+CQ clips use a lean HandBrake-like CQ command path instead of BD2HEVC's normal
+AQ/VBV-heavy movie tuning. It also avoids FFmpeg's `-bluray-compat` shortcut
+for those CQ clips because that option can raise bitrates at the same CQ
+value; BD2HEVC still keeps explicit AUD/GOP/metadata controls for authored
+disc playback. The cutoff can be adjusted:
+
+```bash
+python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --compact-cq-min-duration 20m
+```
+
+For anime encodes similar to HandBrake's H.265 10-bit option, add:
+
+```bash
+python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --hevc-bit-depth 10
+```
+
+Manual controls:
+
+```bash
+python bd2hevc.py auto "Disc" --hevc-bitrate-factor 0.62
+python bd2hevc.py auto "Disc" --min-video-bitrate 2500k --max-video-bitrate 60M
+python bd2hevc.py auto "Disc" --maxrate-multiplier 1.5 --bufsize-multiplier 2.0
+```
+
+## Supported So Far
+
+These are observations from local testing, not a formal compatibility guarantee.
+
+Well-supported in current testing:
+
+- Full-disc BD-J menu backups with the original menus and extras preserved.
+- AVC/H.264 video reencoded to 8-bit HEVC Main with audio/subtitles passed
+  through.
+- MPEG-2 menu/gallery clips selected by the 10-second rule, including sparse
+  still-like clips.
+- VLC/libbluray folder playback on Windows with D3D11 hardware decoding.
+- Discs with BD-J games or interactive extras, based on successful testing with
+  a game-containing disc after the CLPI/menu timing fixes.
+- MakeMKV title scanning as an optional structural validation layer.
+
+Known limits and watch areas:
+
+- BD2HEVC is not certified UHD-BD authoring software. The output is aimed at
+  local folder playback in VLC/libbluray-style players.
+- Every BD-J disc can do unusual things. If a menu, gallery, or game behaves
+  oddly, keep the source and output and run validation/probes before deleting
+  anything.
+- `topmenu-mark-zero-on-return` was validated against a disc with a VLC-only
+  top-menu redraw failure and is applied only when the matching BD-J wrapper
+  signature is detected.
+- VLC can log `buffer deadlock prevented`, `blurayReleaseVout`, or
+  `SetThumbNailClip failed` during BD-J menu/gallery switching even when the
+  output remains usable. D3D11 allocation failures are more suspicious and
+  should be reported with logs.
+- Main10 output is available, but the tested VLC path has been more reliable
+  with the default 8-bit Main output for 8-bit BD sources.
+
+## Repair And Diagnostics
+
+Repair an older output with current converter rules:
+
+```bash
+python bd2hevc.py repair-output "MY_DISC_BACKUP" "Converted UHD-BD/My Disc (BD) (UHD converted)"
+```
+
+Preview the repair plan:
+
+```bash
+python bd2hevc.py repair-output "MY_DISC_BACKUP" "Converted UHD-BD/My Disc (BD) (UHD converted)" --dry-run
+```
+
+Run a headless VLC/libbluray smoke test without opening a visible video window:
+
+```bash
+python bd2hevc.py vlc-smoke "Converted UHD-BD/My Disc (BD) (UHD converted)"
+```
+
+Test the Windows D3D11 path:
+
+```bash
+python bd2hevc.py vlc-smoke "Converted UHD-BD/My Disc (BD) (UHD converted)" --video-plane --d3d11
+```
+
+Probe a specific playlist through libbluray/FFprobe:
+
+```bash
+python bd2hevc.py playlist-probe "Converted UHD-BD/My Disc (BD) (UHD converted)" --playlist 23 --reference "MY_DISC_BACKUP" --decode-seconds 24
+```
+
+Patch missing disc metadata on existing outputs:
+
+```bash
+python bd2hevc.py patch-disc-metadata "Converted UHD-BD"
+```
+
+## JSON Output
+
+Normal commands print human summaries. Use these when you want detailed reports:
+
+```bash
+python bd2hevc.py auto "Disc" --report reports/disc.convert.json
+python bd2hevc.py auto "Disc" --json
+python bd2hevc.py validate "Output" --reference "Disc" --report reports/disc.validate.json
+python bd2hevc.py tools --json
+```
+
+## Legal
+
+Use BD2HEVC only with backups you are legally allowed to process. The project
+does not include or provide decryption, keys, disc data, BD-J source code, or
+copyrighted assets.

@@ -1,0 +1,53 @@
+# Changelog
+
+## 0.1.0 - Unreleased
+
+- Prepared initial public release metadata and GPL-3.0-only licensing.
+- Added `--version`.
+- Added BD2HEVC command-line launcher and package metadata.
+- Added GitHub Actions CI and issue templates for bug and compatibility
+  reports.
+- Split the codebase into focused modules for BD-J compatibility patching,
+  bitrate planning, encoding, muxing, navigation metadata, output repair,
+  progress rendering, queueing, scanning, tool discovery, validation, and output
+  handling.
+- Added user-friendly `start`, `status`, and `jobs` commands for background
+  conversions without manual dry-run/log/progress command juggling.
+- Made status watch rendering terminal-width aware so long disc names and log
+  paths do not wrap and leave duplicate progress lines in Windows terminals.
+- Background jobs now run through a FIFO queue, and `queue` can enqueue
+  multiple conversions from one command line.
+- Changed common commands to print short human summaries by default, with
+  `--json` and `--report` available for detailed machine-readable reports.
+- Added faithful full-disc HEVC conversion preserving menus, extras, audio,
+  subtitles, playlists, and BD-J files.
+- Added automatic foreground progress output for full-disc conversions.
+- Added adjustable HEVC bitrate presets and manual bitrate controls.
+- Added MPEG-2-aware HEVC bitrate estimation so MPEG-2 clips selected for
+  reencoding do not inherit bogus Blu-ray CPB ceiling bitrates.
+- Added sparse menu/gallery timing detection so long still-like clips are
+  expanded to their source duration instead of collapsing to decoded frames.
+- Sparse menu/gallery replacements now use no-B-frame HEVC to reduce VLC/D3D11
+  hardware-decoder allocation failures during rapid gallery navigation.
+- Made MakeMKV optional for full-disc conversion and validation, with
+  `--require-makemkv` for stricter runs.
+- Added Linux-friendly tool discovery for PATH-based `ffmpeg`, `ffprobe`,
+  `tsmuxer`, `makemkvcon`, and `vlc`.
+- Added VLC smoke-test helper that avoids saved resume/bookmark state by
+  default.
+- Added validation checks for long-clip HEVC output, audio passthrough,
+  source-aligned timestamps, sparse clip timing preservation, and no-B-frame
+  sparse HEVC output.
+- Added fallback BD disc-library metadata generation and a
+  `patch-disc-metadata` command for existing converted backups.
+- Added CLPI CPI packet-map scaling for HEVC replacements so VLC title progress
+  and seeking no longer follow stale AVC packet positions past the smaller HEVC
+  streams.
+- Added `playlist-probe` to validate specific Blu-ray playlists through
+  libbluray/FFprobe, including duration, video frame count, decode samples, and
+  stale-CLPI `Read past EOF` detection.
+- Added modular VLC/libbluray compatibility fixes with `--vlc-compat`,
+  repeatable `--vlc-fix`, JSON `--compat-patch-file` support, and
+  `patch-vlc-compat` for existing outputs.
+- Generalized the validated BD-J top-menu compatibility fix so auto mode
+  applies it only when the matching BD-J wrapper signature is present.

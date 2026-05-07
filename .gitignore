@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local reports and conversion state
+reports/
+work/
+debug-build/
+debug-logs/
+debug-src/
+open-source-release/
+*_bd2uhd_*/
+*.log
+*.exitcode.txt
+
+# Local external tools and downloaded binaries
+tools/*
+
+# Disc backups and converted outputs
+Converted UHD-BD/
+**/BDMV/
+**/CERTIFICATE/
+*_FULL_DISC_HEVC/
+*_UHDBD*/
+*.iso
+*.m2ts
+*.mkv
+*.hevc
+*.264
+*.265
+*.h264
+*.h265
+
+# Local sample/source folders used during development
+samples/
+local-backups/
+local-outputs/
+THE_PRINCESS_BRIDE/

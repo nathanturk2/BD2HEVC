@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a BD2HEVC conversion, validation, queue, or playback bug.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This is about local, unencrypted BDMV folder backups.
+          required: true
+        - label: This report does not ask for decryption, keys, ripping help, or copyrighted disc data.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: Paste the BD2HEVC command you ran.
+      placeholder: python bd2hevc.py auto "Disc" "Output"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python, FFmpeg/FFprobe, tsMuxer, GPU/driver, selected encoder, VLC, and MakeMKV if used.
+      placeholder: |
+        OS:
+        Python:
+        FFmpeg:
+        tsMuxer:
+        GPU/encoder:
+        VLC:
+        MakeMKV:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and reports
+      description: Paste relevant excerpts or attach redacted `reports/jobs/*.log`, `*.report.json`, or validation output.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional notes
+      description: Mention whether menus, extras, galleries, games, audio, subtitles, queue status, or validation failed.
