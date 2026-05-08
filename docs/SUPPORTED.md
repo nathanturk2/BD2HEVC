@@ -4,6 +4,9 @@ This is based on local testing so far, not a certification promise.
 
 ## Works Well So Far
 
+- Windows and Linux conversion workflows.
+- WSL conversion workflows when native Linux tools are installed on the WSL
+  `PATH`.
 - Local, unencrypted BDMV folder backups.
 - Full-disc BD-J menu preservation.
 - Extras, galleries, and BD-J interactive content.

@@ -11,6 +11,10 @@ and reencodes video clips longer than 10 seconds to 8-bit HEVC Main.
 
 License: GPL-3.0-only.
 
+Supported platforms: Windows and Linux. WSL is supported for Linux-side
+conversion when native Linux `ffmpeg`, `ffprobe`, and `tsmuxer` are installed on
+the WSL `PATH`.
+
 BD2HEVC is a reencoding and preservation tool for backups you already have. It
 does not decrypt discs, bypass copy protection, provide keys, download media, or
 include copyrighted disc assets.
@@ -199,6 +203,11 @@ python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --ref
 ```
 
 ## Requirements
+
+Supported operating systems:
+
+- Windows
+- Linux, including WSL when native Linux media tools are installed
 
 Required:
 

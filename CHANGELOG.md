@@ -3,6 +3,8 @@
 ## 0.1.0 - Unreleased
 
 - Prepared initial public release metadata and GPL-3.0-only licensing.
+- Documented Windows and Linux platform support, including WSL with native
+  Linux media tools.
 - Added `--version`.
 - Added BD2HEVC command-line launcher and package metadata.
 - Added GitHub Actions CI and issue templates for bug and compatibility
