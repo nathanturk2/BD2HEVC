@@ -239,6 +239,8 @@ Linux:
 
 - Put `ffmpeg`, `ffprobe`, `tsmuxer` or `tsMuxeR`, `makemkvcon`, and `vlc` on
   `PATH`.
+- BD2HEVC intentionally prefers native Linux tools on Linux/WSL and ignores
+  Windows `.exe` tools that may appear through WSL interop.
 - Make sure your FFmpeg build lists `hevc_nvenc`:
 
 ```bash

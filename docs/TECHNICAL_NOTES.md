@@ -191,8 +191,10 @@ make the command fail.
 ## Linux Notes
 
 The code discovers `ffmpeg`, `ffprobe`, `tsmuxer`/`tsMuxeR`, `makemkvcon`, and
-`vlc` from `PATH`. Linux support expects an FFmpeg build with `hevc_nvenc`, a
-working NVIDIA driver stack, and tsMuxer available as an executable.
+`vlc` from `PATH`. On Linux and WSL it prefers native POSIX tools and ignores
+Windows `.exe` tools that may appear through mounted Windows paths. Linux
+support expects an FFmpeg build with `hevc_nvenc`, a working NVIDIA driver
+stack, and tsMuxer available as an executable.
 
 Run:
 

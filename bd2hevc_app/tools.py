@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,9 @@ class ToolError(RuntimeError):
 def refreshed_env() -> dict[str, str]:
     env = os.environ.copy()
     path_parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
-    extra_dirs = [p.parent for p in LOCAL_TSMUXERS if p.exists()] + MAKEMKV_DIRS + VLC_DIRS
+    extra_dirs = [p.parent for p in LOCAL_TSMUXERS if usable_local_tool(p)]
+    if os.name == "nt":
+        extra_dirs += MAKEMKV_DIRS + VLC_DIRS
     for folder in extra_dirs:
         if folder.exists() and not any(Path(p).resolve() == folder.resolve() for p in path_parts if Path(p).exists()):
             path_parts.append(str(folder))
@@ -27,7 +30,19 @@ def refreshed_env() -> dict[str, str]:
     return env
 
 
+def usable_local_tool(path: Path) -> bool:
+    if not path.exists():
+        return False
+    if os.name == "nt":
+        return True
+    if path.suffix.lower() == ".exe":
+        return False
+    return os.access(path, os.X_OK)
+
+
 def which(name: str, extra: list[Path] | None = None) -> str | None:
+    if os.name != "nt" and name.lower().endswith(".exe"):
+        return None
     env = refreshed_env()
     found = shutil_which(name, path=env.get("PATH"))
     if found:
@@ -47,14 +62,28 @@ def shutil_which(name: str, *, path: str | None = None) -> str | None:
 
 
 def discover_tools() -> dict[str, Any]:
-    local_tsmuxer = next((p for p in LOCAL_TSMUXERS if p.exists()), None)
+    local_tsmuxer = next((p for p in LOCAL_TSMUXERS if usable_local_tool(p)), None)
+    if os.name == "nt":
+        ffmpeg = which("ffmpeg.exe") or which("ffmpeg")
+        ffprobe = which("ffprobe.exe") or which("ffprobe")
+        makemkvcon64 = which("makemkvcon64.exe", MAKEMKV_DIRS) or which("makemkvcon64")
+        makemkvcon = which("makemkvcon.exe", MAKEMKV_DIRS) or which("makemkvcon")
+        tsmuxer = str(local_tsmuxer) if local_tsmuxer else (which("tsmuxer.exe") or which("tsMuxeR.exe") or which("tsmuxer") or which("tsMuxeR"))
+        vlc = which("vlc.exe", VLC_DIRS) or which("vlc")
+    else:
+        ffmpeg = which("ffmpeg")
+        ffprobe = which("ffprobe")
+        makemkvcon64 = which("makemkvcon64")
+        makemkvcon = which("makemkvcon")
+        tsmuxer = str(local_tsmuxer) if local_tsmuxer else (which("tsmuxer") or which("tsMuxeR"))
+        vlc = which("vlc")
     tools = {
-        "ffmpeg": which("ffmpeg.exe") or which("ffmpeg"),
-        "ffprobe": which("ffprobe.exe") or which("ffprobe"),
-        "makemkvcon64": which("makemkvcon64.exe", MAKEMKV_DIRS) or which("makemkvcon64"),
-        "makemkvcon": which("makemkvcon.exe", MAKEMKV_DIRS) or which("makemkvcon"),
-        "tsmuxer": str(local_tsmuxer) if local_tsmuxer else (which("tsmuxer.exe") or which("tsMuxeR.exe") or which("tsmuxer") or which("tsMuxeR")),
-        "vlc": which("vlc.exe", VLC_DIRS) or which("vlc"),
+        "ffmpeg": ffmpeg,
+        "ffprobe": ffprobe,
+        "makemkvcon64": makemkvcon64,
+        "makemkvcon": makemkvcon,
+        "tsmuxer": tsmuxer,
+        "vlc": vlc,
     }
     tools["ffmpeg_encoders"] = []
     tools["hevc_encoders"] = []
@@ -116,7 +145,7 @@ def run_cmd(
             stderr=subprocess.PIPE if capture else sys.stderr,
             check=False,
             timeout=timeout_seconds,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **hidden_process_kwargs(),
         )
     except FileNotFoundError as exc:
         raise ToolError(f"Command not found: {cmd[0]}") from exc
@@ -138,4 +167,13 @@ def run_cmd(
 
 
 def format_cmd(cmd: list[str]) -> str:
-    return subprocess.list2cmdline([str(part) for part in cmd])
+    parts = [str(part) for part in cmd]
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
+
+
+def hidden_process_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}

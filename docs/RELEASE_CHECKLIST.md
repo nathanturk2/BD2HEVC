@@ -81,7 +81,8 @@ python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --ref
 - Adjustable HEVC bitrate presets and manual bitrate controls.
 - `compact-cq` preset for compact CQ storage on multi-episode/anime discs and
   high-bitrate movie discs.
-- Windows tested; Linux support prepared through PATH-based tool discovery.
+- Windows tested; WSL/Linux unit tests pass, with native POSIX tool discovery
+  that avoids accidental Windows `.exe` tools.
 
 ## Optional Pre-Announcement Polish
 
@@ -90,7 +91,7 @@ These are useful but not release blockers:
 - Add screenshots or terminal captures of `auto`, `start`, `status --watch`,
   and `validate`.
 - Run one fresh end-to-end conversion from the release folder itself.
-- Try a Linux dry run with PATH-based `ffmpeg`, `ffprobe`, and `tsmuxer`.
+- Try a Linux dry run with native PATH-based `ffmpeg`, `ffprobe`, and `tsmuxer`.
 - Open a few starter GitHub issues tagged `help wanted`, for example Linux
   testing, non-NVIDIA encoder testing, and additional BD-J compatibility
   reports.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -111,6 +112,8 @@ def queue_is_paused() -> bool:
 
 
 def process_creationflags(*, hidden: bool = True, detached: bool = False, new_group: bool = False) -> int:
+    if os.name != "nt":
+        return 0
     flags = 0
     if hidden:
         flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -119,6 +122,15 @@ def process_creationflags(*, hidden: bool = True, detached: bool = False, new_gr
     if new_group:
         flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     return flags
+
+
+def process_kwargs(*, hidden: bool = True, detached: bool = False, new_group: bool = False) -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": process_creationflags(hidden=hidden, detached=detached, new_group=new_group)}
+    kwargs: dict[str, Any] = {}
+    if detached or new_group:
+        kwargs["start_new_session"] = True
+    return kwargs
 
 
 def terminate_process_tree(pid: int | None, *, force: bool = True) -> bool:
@@ -133,11 +145,19 @@ def terminate_process_tree(pid: int | None, *, force: bool = True) -> bool:
             check=False,
             capture_output=True,
             text=True,
-            creationflags=process_creationflags(),
+            **process_kwargs(),
         )
         return result.returncode == 0
+    sig = signal.SIGKILL if force else signal.SIGTERM
     try:
-        os.kill(pid, 15)
+        os.killpg(pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    try:
+        os.kill(pid, sig)
         return True
     except OSError:
         return False
@@ -175,7 +195,7 @@ def pid_is_running(pid: int | None) -> bool:
                 check=False,
                 capture_output=True,
                 text=True,
-                creationflags=process_creationflags(),
+                **process_kwargs(),
             )
             return f'"{pid}"' in (result.stdout or "")
         except Exception:
@@ -243,7 +263,7 @@ def start_background_process(job_path: Path) -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         close_fds=True,
-        creationflags=process_creationflags(detached=True, new_group=True),
+        **process_kwargs(detached=True, new_group=True),
     )
     return int(proc.pid)
 
@@ -335,7 +355,7 @@ def cmd_run_job(args: argparse.Namespace) -> int:
                     text=True,
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    creationflags=process_creationflags(),
+                    **process_kwargs(),
                 )
                 returncode = int(proc.returncode)
                 log.write(f"\nBD2HEVC job finished with exit code {returncode}\n")

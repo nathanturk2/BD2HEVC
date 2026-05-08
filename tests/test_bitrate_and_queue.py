@@ -1,7 +1,9 @@
 ﻿import argparse
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from bd2hevc_app import core as bd
 from bd2hevc_app import bdj, bitrate, config, encoding, muxing, navigation, output, progress, queueing, repair, scan, tools, validation
@@ -195,6 +197,49 @@ class CommandConstructionTests(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "compact-cq")
         self.assertEqual(plan["rate_control"], "cq")
+
+
+class LinuxCompatibilityTests(unittest.TestCase):
+    def test_posix_tool_discovery_ignores_windows_executables(self) -> None:
+        def fake_which(name: str, *, path: str | None = None) -> str | None:
+            native = {
+                "ffmpeg": "/usr/bin/ffmpeg",
+                "ffprobe": "/usr/bin/ffprobe",
+                "makemkvcon": "/usr/bin/makemkvcon",
+                "tsmuxer": "/usr/local/bin/tsmuxer",
+                "vlc": "/usr/bin/vlc",
+            }
+            if name in native:
+                return native[name]
+            if name.lower().endswith(".exe"):
+                return f"/mnt/c/WindowsApps/{name}"
+            return None
+
+        encoders = " V..... hevc_nvenc NVIDIA NVENC hevc encoder\n V..... libx265 libx265 H.265 / HEVC\n"
+        completed = subprocess.CompletedProcess(["ffmpeg"], 0, stdout=encoders, stderr="")
+        with (
+            mock.patch.object(tools.os, "name", "posix"),
+            mock.patch.object(tools, "LOCAL_TSMUXERS", []),
+            mock.patch.object(tools, "MAKEMKV_DIRS", []),
+            mock.patch.object(tools, "VLC_DIRS", []),
+            mock.patch.object(tools, "shutil_which", side_effect=fake_which),
+            mock.patch.object(tools, "run_cmd", return_value=completed),
+        ):
+            found = tools.discover_tools()
+
+        self.assertEqual(found["ffmpeg"], "/usr/bin/ffmpeg")
+        self.assertEqual(found["ffprobe"], "/usr/bin/ffprobe")
+        self.assertEqual(found["makemkvcon"], "/usr/bin/makemkvcon")
+        self.assertEqual(found["tsmuxer"], "/usr/local/bin/tsmuxer")
+        self.assertEqual(found["vlc"], "/usr/bin/vlc")
+        self.assertFalse(str(found["ffmpeg"]).lower().endswith(".exe"))
+        self.assertIn("hevc_nvenc", found["hevc_encoders"])
+
+    def test_posix_background_process_uses_new_session_not_creationflags(self) -> None:
+        with mock.patch.object(queueing.os, "name", "posix"):
+            self.assertEqual(queueing.process_creationflags(detached=True, new_group=True), 0)
+            self.assertEqual(queueing.process_kwargs(detached=True, new_group=True), {"start_new_session": True})
+            self.assertEqual(queueing.process_kwargs(), {})
 
 
 if __name__ == "__main__":

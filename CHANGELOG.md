@@ -31,8 +31,10 @@
   hardware-decoder allocation failures during rapid gallery navigation.
 - Made MakeMKV optional for full-disc conversion and validation, with
   `--require-makemkv` for stricter runs.
-- Added Linux-friendly tool discovery for PATH-based `ffmpeg`, `ffprobe`,
-  `tsmuxer`, `makemkvcon`, and `vlc`.
+- Added Linux-friendly tool discovery for native PATH-based `ffmpeg`,
+  `ffprobe`, `tsmuxer`, `makemkvcon`, and `vlc`, including WSL handling that
+  avoids accidental Windows `.exe` tools.
+- Added POSIX-safe background queue detachment and cancellation behavior.
 - Added VLC smoke-test helper that avoids saved resume/bookmark state by
   default.
 - Added validation checks for long-clip HEVC output, audio passthrough,
