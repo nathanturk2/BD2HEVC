@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .bitrate import safe_int
-from .config import DEFAULT_ANIME_CQ_MIN_DURATION, DEFAULT_JOB_DIR, DEFAULT_VLC_COMPATIBILITY_MODE, QUEUE_PAUSE_FILE, QUEUE_POLL_SECONDS, ROOT
+from .config import ANIME_CQ_VALUE, DEFAULT_ANIME_CQ_MIN_DURATION, DEFAULT_JOB_DIR, DEFAULT_VLC_COMPATIBILITY_MODE, QUEUE_PAUSE_FILE, QUEUE_POLL_SECONDS, ROOT
 from .progress import WatchRenderer, progress_lines, read_text_flexible
 from .tools import ToolError, format_cmd, refreshed_env, selected_hevc_encoder
 
@@ -232,12 +232,15 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--hevc-bit-depth", getattr(args, "hevc_bit_depth", 8), 8)
     append_option(argv, "--encoder", selected_hevc_encoder(args), "hevc_nvenc")
     append_option(argv, "--encode-ahead-depth", getattr(args, "encode_ahead_depth", 3), 3)
+    if getattr(args, "bitrate_preset_file", None):
+        argv.extend(["--bitrate-preset-file", str(Path(args.bitrate_preset_file).resolve())])
     append_option(argv, "--bitrate-mode", getattr(args, "bitrate_mode", "balanced"), "balanced")
     append_option(argv, "--hevc-bitrate-factor", getattr(args, "hevc_bitrate_factor", None))
     append_option(argv, "--min-video-bitrate", getattr(args, "min_video_bitrate", 2_000_000), 2_000_000)
     append_option(argv, "--max-video-bitrate", getattr(args, "max_video_bitrate", 80_000_000), 80_000_000)
     append_option(argv, "--maxrate-multiplier", getattr(args, "maxrate_multiplier", 1.55), 1.55)
     append_option(argv, "--bufsize-multiplier", getattr(args, "bufsize_multiplier", 2.0), 2.0)
+    append_option(argv, "--compact-cq-value", getattr(args, "compact_cq_value", ANIME_CQ_VALUE), ANIME_CQ_VALUE)
     append_option(argv, "--compact-cq-min-duration", getattr(args, "anime_cq_min_duration", DEFAULT_ANIME_CQ_MIN_DURATION), DEFAULT_ANIME_CQ_MIN_DURATION)
     append_option(argv, "--vlc-compat", getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE), DEFAULT_VLC_COMPATIBILITY_MODE)
     for fix in getattr(args, "vlc_fix", None) or []:

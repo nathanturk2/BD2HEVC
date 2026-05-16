@@ -122,6 +122,26 @@ replacement clips.
 BD2HEVC estimates the target from video-only source bitrate. Audio is ignored so
 large passthrough audio tracks do not inflate the HEVC target.
 
+The default AVC/H.264-to-HEVC curve is intentionally an estimate, not a promise:
+there is no single bitrate that is mathematically correct from source bitrate
+alone. The model is anchored to HEVC's common target of comparable perceptual
+quality at about half the H.264/AVC bitrate, while leaving extra room for
+one-pass hardware encoding and authored-disc compatibility constraints. The
+current `balanced` AVC curve lands around 0.48-0.55 of the source video bitrate
+depending on source bits-per-pixel-per-frame; `transparent` keeps the older,
+more conservative margin by scaling that curve upward.
+
+Useful references:
+
+- IEEE CASS summary of Sullivan, Ohm, Han, and Wiegand's HEVC overview:
+  <https://ieee-cas.org/media/overview-high-efficiency-video-coding-hevc-standard>
+- JCT-VC subjective verification-test summary:
+  <https://www.microsoft.com/en-us/research/publication/hevc-subjective-video-quality-test-results/>
+- NVIDIA NVENC rate-control documentation:
+  <https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/nvenc-video-encoder-api-prog-guide/index.html>
+- x265 CRF/rate-control documentation:
+  <https://x265.readthedocs.io/en/stable/cli.html>
+
 MPEG-2 sources are treated as less compression-efficient than AVC. When FFprobe
 reports the Blu-ray MPEG-2 CPB ceiling instead of the actual clip bitrate,
 BD2HEVC falls back to the container bitrate minus known audio. That keeps
@@ -131,10 +151,11 @@ target when they are long enough to be selected for HEVC replacement.
 The presets are:
 
 - `smaller`: more aggressive space saving.
-- `balanced`: default tested setting.
+- `balanced`: default tested setting, centered on a source-equivalent HEVC
+  estimate with a modest hardware-encoding margin.
 - `transparent`: higher target for harder material.
 - `source-ratio`: fixed source video bitrate ratio.
-- `compact-cq`: CQ 18 for long clips and `smaller` for shorter replacement
+- `compact-cq`: CQ 18 by default for long clips and `smaller` for shorter replacement
   clips. This is aimed at compact storage for multi-episode discs and
   high-bitrate movie discs where CQ is preferred over the source-equivalent
   bitrate curve. On `hevc_nvenc`, long CQ clips intentionally use a
@@ -145,7 +166,11 @@ The presets are:
 
 Advanced users can override the curve with `--hevc-bitrate-factor`, plus
 `--min-video-bitrate`, `--max-video-bitrate`, `--maxrate-multiplier`, and
-`--bufsize-multiplier`.
+`--bufsize-multiplier`. For reusable presets, `--bitrate-preset-file` accepts a
+JSON object with `mode`, `hevc_bitrate_factor`, `min_video_bitrate`,
+`max_video_bitrate`, `maxrate_multiplier`, `bufsize_multiplier`,
+`compact_cq_value`, and `compact_cq_min_duration`. Non-default CLI flags
+override matching preset fields.
 
 ## BD-J And Navigation
 

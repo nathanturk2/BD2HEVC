@@ -1,5 +1,6 @@
 ﻿import argparse
 import subprocess
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -50,6 +51,40 @@ class ModuleSplitTests(unittest.TestCase):
 
 
 class BitratePresetTests(unittest.TestCase):
+    def test_balanced_avc_curve_tracks_hevc_source_equivalent_target(self) -> None:
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=30_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=120 * 60,
+            source_codec="h264",
+            mode="balanced",
+        )
+        self.assertEqual(plan["rate_control"], "vbr")
+        self.assertEqual(plan["factor"], 0.55)
+
+    def test_transparent_keeps_extra_margin_over_balanced(self) -> None:
+        balanced = bd.equivalent_hevc_bitrate(
+            video_bps=30_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=120 * 60,
+            source_codec="h264",
+            mode="balanced",
+        )
+        transparent = bd.equivalent_hevc_bitrate(
+            video_bps=30_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=120 * 60,
+            source_codec="h264",
+            mode="transparent",
+        )
+        self.assertGreater(transparent["target_bps"], balanced["target_bps"])
+
     def test_compact_cq_uses_cq_over_default_cutoff(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
             video_bps=12_000_000,
@@ -63,6 +98,20 @@ class BitratePresetTests(unittest.TestCase):
         self.assertEqual(plan["rate_control"], "cq")
         self.assertEqual(plan["cq"], 18)
 
+    def test_compact_cq_value_is_configurable(self) -> None:
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=12_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=11 * 60,
+            source_codec="h264",
+            mode="compact-cq",
+            compact_cq_value=20,
+        )
+        self.assertEqual(plan["rate_control"], "cq")
+        self.assertEqual(plan["cq"], 20)
+
     def test_compact_cq_uses_smaller_for_short_clips(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
             video_bps=12_000_000,
@@ -75,6 +124,38 @@ class BitratePresetTests(unittest.TestCase):
         )
         self.assertEqual(plan["rate_control"], "vbr")
         self.assertEqual(plan["fallback_bitrate_mode"], "smaller")
+
+    def test_bitrate_preset_file_sets_mode_bounds_and_cq(self) -> None:
+        with TemporaryDirectory() as temp:
+            preset = Path(temp) / "preset.json"
+            preset.write_text(
+                json.dumps(
+                    {
+                        "mode": "compact-cq",
+                        "compact_cq_value": 20,
+                        "compact_cq_min_duration": "7m",
+                        "max_video_bitrate": "70M",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                bitrate_preset_file=str(preset),
+                bitrate_mode="balanced",
+                hevc_bitrate_factor=None,
+                min_video_bitrate=2_000_000,
+                max_video_bitrate=80_000_000,
+                maxrate_multiplier=1.55,
+                bufsize_multiplier=2.0,
+                anime_cq_min_duration=config.DEFAULT_ANIME_CQ_MIN_DURATION,
+                compact_cq_value=config.ANIME_CQ_VALUE,
+            )
+            options = bd.bitrate_options_from_args(args)
+
+        self.assertEqual(options["mode"], "compact-cq")
+        self.assertEqual(options["compact_cq_value"], 20)
+        self.assertEqual(options["anime_cq_min_duration"], 7 * 60)
+        self.assertEqual(options["max_bps"], 70_000_000)
 
 
 class CopyPlanningTests(unittest.TestCase):
@@ -154,12 +235,14 @@ class CommandConstructionTests(unittest.TestCase):
             hevc_bit_depth=8,
             encoder="hevc_nvenc",
             encode_ahead_depth=3,
+            bitrate_preset_file=None,
             bitrate_mode="compact-cq",
             hevc_bitrate_factor=None,
             min_video_bitrate=2_000_000,
             max_video_bitrate=80_000_000,
             maxrate_multiplier=1.55,
             bufsize_multiplier=2.0,
+            compact_cq_value=20,
             anime_cq_min_duration=12 * 60.0,
             vlc_compat=bd.DEFAULT_VLC_COMPATIBILITY_MODE,
             vlc_fix=[],
@@ -169,6 +252,8 @@ class CommandConstructionTests(unittest.TestCase):
         cmd = bd.auto_command_for_job(args, Path("out"), Path("report.json"))
         self.assertIn("--bitrate-mode", cmd)
         self.assertIn("compact-cq", cmd)
+        self.assertIn("--compact-cq-value", cmd)
+        self.assertIn("20", cmd)
         self.assertIn("--compact-cq-min-duration", cmd)
         self.assertIn("720.0", cmd)
 

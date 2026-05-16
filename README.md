@@ -282,7 +282,10 @@ bd2hevc tools
 
 The default `balanced` mode estimates the HEVC target from the source video-only
 bitrate, resolution, frame rate, and source codec. Audio bitrate is ignored so
-passthrough audio does not inflate the video target.
+passthrough audio does not inflate the video target. The AVC/H.264 curve is
+anchored around the common HEVC "same quality at roughly half the bitrate"
+target, then keeps a safety margin for one-pass hardware encoding and Blu-ray
+folder playback.
 
 MPEG-2 sources get codec-aware bitrate handling. When FFprobe reports a Blu-ray
 MPEG-2 CPB ceiling instead of the actual clip bitrate, BD2HEVC falls back to the
@@ -315,11 +318,41 @@ disc playback. The cutoff can be adjusted:
 python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --compact-cq-min-duration 20m
 ```
 
+The CQ value can be adjusted too. Higher CQ values are smaller/lower quality;
+lower CQ values are larger/higher quality:
+
+```bash
+python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --compact-cq-value 20
+```
+
 For anime encodes similar to HandBrake's H.265 10-bit option, add:
 
 ```bash
 python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --hevc-bit-depth 10
 ```
+
+Custom presets can be put in a JSON file so repeat conversions do not need a
+long command line:
+
+```json
+{
+  "mode": "compact-cq",
+  "compact_cq_value": 20,
+  "compact_cq_min_duration": "10m",
+  "max_video_bitrate": "70M"
+}
+```
+
+Use it like this:
+
+```bash
+python bd2hevc.py auto "Disc" --bitrate-preset-file examples/bitrate/compact-cq20.json
+```
+
+Preset files can set `mode`, `hevc_bitrate_factor`, `min_video_bitrate`,
+`max_video_bitrate`, `maxrate_multiplier`, `bufsize_multiplier`,
+`compact_cq_value`, and `compact_cq_min_duration`. Non-default CLI flags still
+work for one-off overrides.
 
 Manual controls:
 
