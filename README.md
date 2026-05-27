@@ -81,8 +81,11 @@ Check the newest job:
 python bd2hevc.py status
 ```
 
-`status` reports duration-weighted overall progress, so a long movie clip counts
-by how far that clip has encoded/remuxed rather than only as "one clip not done."
+`status` reports duration-weighted encoding progress, so a long movie clip
+counts by how far that clip has encoded rather than only as "one clip not
+done." Muxing appears as a separate live line because it is a required follow-up
+step, but it does not make the top progress bar fall backward after a large
+clip finishes encoding.
 
 Watch the whole queue until all currently running or queued jobs finish:
 

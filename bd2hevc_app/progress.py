@@ -76,6 +76,7 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
         encode_starts: dict[str, re.Match[str]] = {}
         mux_starts: dict[str, re.Match[str]] = {}
         encode_done: set[str] = set()
+        encoded_done: list[str] = []
         mux_done: set[str] = set()
         validate_done: list[str] = []
         pipeline_mode = None
@@ -86,8 +87,11 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
             elif event == "encode-start":
                 encode_starts[clip_file] = marker
                 encode_done.discard(clip_file)
+                encoded_done = [clip for clip in encoded_done if clip != clip_file]
             elif event in {"encode-done", "encode-failed"}:
                 encode_done.add(clip_file)
+                if event == "encode-done" and clip_file not in encoded_done:
+                    encoded_done.append(clip_file)
             elif event == "mux-start":
                 mux_starts[clip_file] = marker
                 mux_done.discard(clip_file)
@@ -127,6 +131,7 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
             "encode_file": active_encode,
             "encode_seconds": encode_seconds,
             "encode_speed": encode_speed,
+            "encoded_files": encoded_done,
             "done_files": list(dict.fromkeys(validate_done or sorted(mux_done))),
             "pipeline": pipeline_mode,
         }
@@ -209,13 +214,14 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
     total_seconds = sum(float(clip.get("duration") or 0) for clip in clips)
     lines: list[str] = []
     if exit_code == 0:
-        lines.append(f"{progress_bar(100.0, args.width)} {100.0:5.1f}%  {len(clips)}/{len(clips)} clips complete  stage: completed")
+        lines.append(f"{progress_bar(100.0, args.width)} {100.0:5.1f}% encoded  {len(clips)}/{len(clips)} clips complete  stage: completed")
         return lines
     if exit_code is not None:
-        lines.append(f"{progress_bar(0.0, args.width)}   0.0%  0/{len(clips)} clips complete  stage: failed exitcode={exit_code}")
+        lines.append(f"{progress_bar(0.0, args.width)}   0.0% encoded  0/{len(clips)} clips complete  stage: failed exitcode={exit_code}")
         return lines
     log_state = latest_log_progress(log_path) if log_path else {}
     done: list[str] = list(dict.fromkeys(log_state.get("done_files") or []))
+    encoded: list[str] = list(dict.fromkeys(log_state.get("encoded_files") or []))
     if inspect_outputs:
         tools = discover_tools()
         stream_dir = target / "BDMV" / "STREAM"
@@ -230,7 +236,10 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
                     desired_bit_depth is None or output_matches_hevc_bit_depth(info, desired_bit_depth)
                 ):
                     done.append(clip["file"])
+                    if clip["file"] not in encoded:
+                        encoded.append(clip["file"])
         done = list(dict.fromkeys(done))
+        encoded = list(dict.fromkeys(encoded))
     mux_file = log_state.get("mux_file")
     encode_file = log_state.get("encode_file")
     current_file = log_state.get("current_file")
@@ -242,6 +251,7 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
     encode_percent = 0.0
     encode_duration = 0.0
     done_seconds = sum(float(clip.get("duration") or 0) for clip in clips if clip["file"] in done)
+    encoded_seconds = sum(float(clip.get("duration") or 0) for clip in clips if clip["file"] in encoded)
     if current_file in done:
         current_seconds = 0
     elif current_file:
@@ -254,8 +264,12 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
         encode_duration = next((float(clip.get("duration") or 0) for clip in clips if clip["file"] == encode_file), 0)
         encode_seconds = min(encode_seconds, encode_duration)
         encode_percent = clamp_percent(encode_seconds / encode_duration * 100.0) if encode_duration else 0.0
+    encoded_current_seconds = 0.0
+    if encode_file and encode_file not in encoded:
+        encoded_current_seconds = encode_seconds
+    encoded_completed_seconds = encoded_seconds + encoded_current_seconds
     completed_seconds = done_seconds + current_seconds
-    percent = clamp_percent((completed_seconds / total_seconds * 100.0) if total_seconds else (100.0 if exit_code == 0 else 0.0))
+    percent = clamp_percent((encoded_completed_seconds / total_seconds * 100.0) if total_seconds else (100.0 if exit_code == 0 else 0.0))
     bar = progress_bar(percent, args.width)
     if exit_code == 0:
         stage = "completed"
@@ -265,8 +279,10 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
         stage = str(log_state["current_stage"])
     else:
         stage = "encoding" if current_file and current_seconds else ("post-processing or validation" if len(done) == len(clips) and clips else ("encoding/remuxing" if done else "scanning/copying/planning"))
-    lines.append(f"{bar} {percent:5.1f}% overall  {format_duration(completed_seconds)} / {format_duration(total_seconds)}  stage: {stage}")
-    lines.append(f"clips: {len(done)}/{len(clips)} complete")
+    lines.append(f"{bar} {percent:5.1f}% encoded  {format_duration(encoded_completed_seconds)} / {format_duration(total_seconds)}  stage: {stage}")
+    lines.append(f"encoded clips: {len(encoded)}/{len(clips)} complete")
+    if done and len(done) != len(encoded):
+        lines.append(f"muxed clips: {len(done)}/{len(clips)} complete")
     if mux_file and mux_file not in done:
         details = f"muxing:  {mux_file}  {progress_bar(current_percent, min(args.width, 24))} {current_percent:5.1f}%  {format_duration(current_seconds)} / {format_duration(current_duration)}"
         lines.append(details)

@@ -49,6 +49,44 @@ class ModuleSplitTests(unittest.TestCase):
             state = progress.latest_log_progress(log)
             self.assertEqual(state["done_files"], ["00000.m2ts", "00001.m2ts"])
 
+    def test_top_progress_tracks_encoding_not_active_mux(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            plan = root / "plan.json"
+            log = root / "job.log"
+            plan.write_text(
+                json.dumps(
+                    {
+                        "reencode_clips": [
+                            {"file": "00001.m2ts", "duration": 100.0},
+                            {"file": "00002.m2ts", "duration": 100.0},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            log.write_text(
+                "\n".join(
+                    [
+                        "BD2HEVC_PROGRESS encode-start 00001.m2ts",
+                        "frame= 100 time=00:01:40.00 speed=4.0x",
+                        "BD2HEVC_PROGRESS encode-done 00001.m2ts",
+                        "BD2HEVC_PROGRESS mux-start 00001.m2ts",
+                        "10.0% complete",
+                        "BD2HEVC_PROGRESS encode-start 00002.m2ts",
+                        "frame= 100 time=00:00:20.00 speed=3.0x",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(target=str(root / "out"), plan=str(plan), log=str(log), width=32, watch=0)
+
+            lines = progress.progress_lines(args, inspect_outputs=False)
+
+        self.assertIn("60.0% encoded", lines[0])
+        self.assertIn("encoded clips: 1/2 complete", lines[1])
+        self.assertTrue(any("muxing:" in line and "10.0%" in line for line in lines))
+
 
 class BitratePresetTests(unittest.TestCase):
     def test_balanced_avc_curve_tracks_hevc_source_equivalent_target(self) -> None:
