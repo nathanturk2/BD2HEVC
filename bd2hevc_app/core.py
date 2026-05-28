@@ -72,6 +72,7 @@ from .output import (
     conversion_succeeded,
     copy_disc_tree_skipping_reencoded_streams,
     default_output_for,
+    disc_title_from_folder_name,
     ensure_disc_library_metadata,
     make_output_available,
     path_or_none,
@@ -1215,15 +1216,15 @@ def cmd_queue(args: argparse.Namespace) -> int:
 
 
 def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--bitrate-mode", choices=BITRATE_MODES, default="balanced", help="HEVC bitrate preset. balanced is the tested default; smaller saves more space; transparent spends more bitrate; source-ratio uses a fixed multiplier; compact-cq uses configurable CQ for long clips and smaller for shorter reencoded clips. episode-compact and anime-cq18 are accepted as legacy aliases.")
+    parser.add_argument("--bitrate-mode", choices=BITRATE_MODES, default="balanced", help="HEVC bitrate preset. balanced is the tested default; smaller saves more space; transparent spends more bitrate; source-ratio uses a fixed multiplier; compact-cq uses configurable CQ for reencoded clips. episode-compact and anime-cq18 are accepted as legacy aliases.")
     parser.add_argument("--bitrate-preset-file", default=None, help="Load bitrate settings from a JSON preset file. Non-default CLI options override preset fields.")
     parser.add_argument("--hevc-bitrate-factor", type=float, default=None, help="Override bitrate mode with a fixed HEVC/source video bitrate multiplier, e.g. 0.62.")
     parser.add_argument("--min-video-bitrate", type=parse_bitrate_arg, default=2_000_000, help="Minimum target video bitrate. Accepts values like 2000k or 2M.")
     parser.add_argument("--max-video-bitrate", type=parse_bitrate_arg, default=80_000_000, help="Maximum target video bitrate. Accepts values like 80M.")
     parser.add_argument("--maxrate-multiplier", type=float, default=1.55, help="VBV maxrate multiplier relative to target bitrate.")
     parser.add_argument("--bufsize-multiplier", type=float, default=2.0, help="VBV buffer multiplier relative to maxrate.")
-    parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for long clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
-    parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
+    parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for reencoded clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
+    parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Defaults to the 10-second reencode threshold. Raise it if only episode/movie-length clips should use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
 
 
 def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: bool = False) -> None:

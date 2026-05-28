@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .config import HARDWARE_HEVC_ENCODERS, HEVC_ENCODERS, LOCAL_TSMUXERS, MAKEMKV_DIRS, VLC_DIRS
+from .config import HARDWARE_HEVC_ENCODERS, HEVC_ENCODERS, LOCAL_FFMPEG_DIRS, LOCAL_TSMUXERS, MAKEMKV_DIRS, VLC_DIRS
 
 
 class ToolError(RuntimeError):
@@ -21,13 +21,27 @@ def refreshed_env() -> dict[str, str]:
     env = os.environ.copy()
     path_parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
     extra_dirs = [p.parent for p in LOCAL_TSMUXERS if usable_local_tool(p)]
+    extra_dirs += [p for p in LOCAL_FFMPEG_DIRS if p.exists()]
     if os.name == "nt":
         extra_dirs += MAKEMKV_DIRS + VLC_DIRS
     for folder in extra_dirs:
-        if folder.exists() and not any(Path(p).resolve() == folder.resolve() for p in path_parts if Path(p).exists()):
+        try:
+            folder_exists = folder.exists()
+            folder_resolved = folder.resolve() if folder_exists else folder
+        except OSError:
+            continue
+        if folder_exists and not any(same_existing_path(p, folder_resolved) for p in path_parts):
             path_parts.append(str(folder))
     env["PATH"] = os.pathsep.join(path_parts)
     return env
+
+
+def same_existing_path(path_value: str, expected: Path) -> bool:
+    try:
+        path = Path(path_value)
+        return path.exists() and path.resolve() == expected
+    except (NotImplementedError, OSError):
+        return False
 
 
 def usable_local_tool(path: Path) -> bool:

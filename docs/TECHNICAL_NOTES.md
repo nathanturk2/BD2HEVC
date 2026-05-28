@@ -155,14 +155,14 @@ The presets are:
   estimate with a modest hardware-encoding margin.
 - `transparent`: higher target for harder material.
 - `source-ratio`: fixed source video bitrate ratio.
-- `compact-cq`: CQ 18 by default for long clips and `smaller` for shorter replacement
-  clips. This is aimed at compact storage for multi-episode discs and
-  high-bitrate movie discs where CQ is preferred over the source-equivalent
-  bitrate curve. On `hevc_nvenc`, long CQ clips intentionally use a
-  HandBrake-like CQ path without the normal spatial/temporal AQ and VBV tuning
-  or FFmpeg's `-bluray-compat` shortcut because those options can materially
-  increase bitrate at the same CQ value. Explicit AUD/GOP/metadata controls
-  are still used for authored disc playback.
+- `compact-cq`: uses CQ 18 by default for every clip above the 10-second
+  reencode threshold. This is aimed at compact storage for multi-episode discs
+  and high-bitrate movie discs where CQ is preferred over the source-equivalent
+  bitrate curve. On `hevc_nvenc`, CQ clips
+  intentionally use a HandBrake-like CQ path without the normal
+  spatial/temporal AQ and VBV tuning or FFmpeg's `-bluray-compat` shortcut
+  because those options can materially increase bitrate at the same CQ value.
+  Explicit AUD/GOP/metadata controls are still used for authored disc playback.
 
 Advanced users can override the curve with `--hevc-bitrate-factor`, plus
 `--min-video-bitrate`, `--max-video-bitrate`, `--maxrate-multiplier`, and

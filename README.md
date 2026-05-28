@@ -104,6 +104,15 @@ instead of appending a new progress bar every refresh. With no number it refresh
 once per second. Add a number to choose another interval, for example
 `--watch 10`.
 
+Use compact CQ for episode-heavy discs or very large movie discs:
+
+```bash
+python bd2hevc.py queue "Anime Disc 1" "Anime Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
+```
+
+`compact-cq` keeps the meaning of CQ by using the requested CQ level on each
+clip that is long enough to be reencoded.
+
 List recent jobs:
 
 ```bash
@@ -259,6 +268,72 @@ Linux:
 ffmpeg -hide_banner -encoders | grep hevc_nvenc
 ```
 
+## VLC Java Setup For Menus
+
+BD2HEVC preserves BD-J menus, so VLC needs a Java runtime that libbluray can
+load. Without Java, VLC may play the main video but skip or break interactive
+menus.
+
+Windows:
+
+- Install 64-bit VLC.
+- Install a 64-bit Java runtime. Java 8 is the safest choice for BD-J menus;
+  a 64-bit OpenJDK or JDK build is fine.
+- Set `JAVA_HOME` to the Java install folder, for example
+  `C:\Program Files\Eclipse Adoptium\jdk-8...`.
+- Add both `%JAVA_HOME%\bin` and, when present, `%JAVA_HOME%\bin\server` to the
+  user or system `PATH`.
+- Restart VLC after changing environment variables.
+
+Check Java from a new terminal:
+
+```cmd
+java -version
+where java
+```
+
+Open a backup in VLC:
+
+1. Choose `Media` > `Open Disc`.
+2. Select `Blu-ray`.
+3. Browse to the backup folder that contains `BDMV`.
+4. Leave `No disc menus` unchecked.
+5. Press `Play`.
+
+Linux:
+
+- Install VLC, Java, and the BD-J support package for your distribution. On
+  Debian/Ubuntu-style systems this is usually:
+
+```bash
+sudo apt install vlc openjdk-8-jre libbluray-bdj libbluray-bin
+```
+
+- If Java 8 is unavailable, use the distro's default JRE, but BD-J menu
+  compatibility can vary by VLC/libbluray build.
+- If multiple Java versions are installed, set `JAVA_HOME` before launching VLC:
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+export PATH="$JAVA_HOME/bin:$PATH"
+vlc "bluray:///path/to/backup"
+```
+
+Troubleshooting:
+
+- Match VLC and Java architecture on Windows: 64-bit VLC needs 64-bit Java.
+- Open `Tools` > `Messages`, set verbosity to `2`, and look for `libbluray`
+  messages if menus do not load.
+- Some VLC builds are packaged without BD-J support. Try the official VLC build
+  on Windows or install your distro's `libbluray-bdj` package on Linux.
+- WSL is useful for conversion, but native Windows or native Linux VLC is usually
+  the better place to test BD-J menu playback.
+
+References:
+
+- VideoLAN libbluray: <https://images.videolan.org/developers/libbluray.html>
+- VLC user documentation: <https://vlc-user-documentation.readthedocs.io/>
+
 Optional editable install:
 
 ```bash
@@ -309,13 +384,13 @@ python bd2hevc.py auto "Disc" --bitrate-mode compact-cq
 over the source-equivalent bitrate curve. It is useful for multi-episode/anime
 discs and can also make high-bitrate movie discs substantially smaller than the
 balanced preset.
-Clips at least 10 minutes long use HEVC CQ 18, while shorter clips that still
-need reencoding use the `smaller` bitrate curve. With `hevc_nvenc`, long
-CQ clips use a lean HandBrake-like CQ command path instead of BD2HEVC's normal
-AQ/VBV-heavy movie tuning. It also avoids FFmpeg's `-bluray-compat` shortcut
-for those CQ clips because that option can raise bitrates at the same CQ
-value; BD2HEVC still keeps explicit AUD/GOP/metadata controls for authored
-disc playback. The cutoff can be adjusted:
+By default, every clip above BD2HEVC's 10-second reencode threshold uses HEVC
+CQ 18. With `hevc_nvenc`, CQ clips use a lean HandBrake-like CQ command path
+instead of BD2HEVC's normal AQ/VBV-heavy movie tuning. It also avoids FFmpeg's
+`-bluray-compat` shortcut for those CQ clips because that option can raise
+bitrates at the same CQ value; BD2HEVC still keeps explicit AUD/GOP/metadata
+controls for authored disc playback. The CQ cutoff can be raised if you only
+want episode/movie-length clips to use CQ:
 
 ```bash
 python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --compact-cq-min-duration 20m
@@ -341,7 +416,7 @@ long command line:
 {
   "mode": "compact-cq",
   "compact_cq_value": 20,
-  "compact_cq_min_duration": "10m",
+  "compact_cq_min_duration": "10s",
   "max_video_bitrate": "70M"
 }
 ```

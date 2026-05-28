@@ -123,18 +123,19 @@ class BitratePresetTests(unittest.TestCase):
         )
         self.assertGreater(transparent["target_bps"], balanced["target_bps"])
 
-    def test_compact_cq_uses_cq_over_default_cutoff(self) -> None:
+    def test_compact_cq_uses_cq_over_default_reencode_cutoff(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
             video_bps=12_000_000,
             width=1920,
             height=1080,
             fps=23.976,
-            duration_seconds=11 * 60,
+            duration_seconds=11,
             source_codec="h264",
             mode="compact-cq",
         )
         self.assertEqual(plan["rate_control"], "cq")
         self.assertEqual(plan["cq"], 18)
+        self.assertNotIn("fallback_vbr", plan)
 
     def test_compact_cq_value_is_configurable(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
@@ -150,13 +151,13 @@ class BitratePresetTests(unittest.TestCase):
         self.assertEqual(plan["rate_control"], "cq")
         self.assertEqual(plan["cq"], 20)
 
-    def test_compact_cq_uses_smaller_for_short_clips(self) -> None:
+    def test_compact_cq_uses_smaller_below_default_reencode_cutoff(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
             video_bps=12_000_000,
             width=1920,
             height=1080,
             fps=23.976,
-            duration_seconds=9 * 60,
+            duration_seconds=9,
             source_codec="h264",
             mode="compact-cq",
         )

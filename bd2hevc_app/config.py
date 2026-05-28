@@ -16,6 +16,10 @@ LOCAL_TSMUXERS = [
     ROOT / "tools" / "tsmuxer" / "tsmuxer",
     ROOT / "tools" / "tsmuxer" / "tsMuxeR",
 ]
+LOCAL_FFMPEG_DIRS = [
+    ROOT / "tools" / "ffmpeg" / "bin",
+    ROOT / "tools" / "ffmpeg",
+]
 MAKEMKV_DIRS = [
     Path(r"C:\Program Files (x86)\MakeMKV"),
     Path(r"C:\Program Files\MakeMKV"),
@@ -43,7 +47,7 @@ BITRATE_MODE_ALIASES = {
 }
 DEFAULT_COMPACT_CQ_VALUE = 18
 ANIME_CQ_VALUE = DEFAULT_COMPACT_CQ_VALUE
-DEFAULT_ANIME_CQ_MIN_DURATION = 10 * 60.0
+DEFAULT_ANIME_CQ_MIN_DURATION = SECONDS_REENCODE_THRESHOLD
 BITRATE_MODES = ("smaller", "balanced", "transparent", "source-ratio", ANIME_CQ_PRESET, LEGACY_EPISODE_COMPACT_PRESET, LEGACY_ANIME_CQ_PRESET)
 
 HEVC_ENCODERS = ("hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265")

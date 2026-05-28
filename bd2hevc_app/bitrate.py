@@ -8,7 +8,13 @@ import math
 from pathlib import Path
 from typing import Any
 
-from .config import ANIME_CQ_PRESET, ANIME_CQ_VALUE, BITRATE_MODE_ALIASES, BITRATE_MODES, DEFAULT_ANIME_CQ_MIN_DURATION
+from .config import (
+    ANIME_CQ_PRESET,
+    ANIME_CQ_VALUE,
+    BITRATE_MODE_ALIASES,
+    BITRATE_MODES,
+    DEFAULT_ANIME_CQ_MIN_DURATION,
+)
 from .tools import ToolError
 
 
@@ -345,7 +351,10 @@ def equivalent_hevc_bitrate(
             "max_mbps": mbps(max_bps),
             "bufsize_multiplier": bufsize_multiplier,
             "source_codec": (source_codec or "").lower() or None,
-            "reason": f"compact-cq preset: CQ {compact_cq_value} for clips at least {format_duration(anime_cq_min_duration)}",
+            "reason": (
+                f"compact-cq preset: CQ {compact_cq_value} for clips at least "
+                f"{format_duration(anime_cq_min_duration)}"
+            ),
         }
     bitrate_mode = "smaller" if mode == ANIME_CQ_PRESET and factor_override is None else mode
     if not video_bps or not width or not height or not fps:
