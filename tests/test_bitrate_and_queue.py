@@ -483,6 +483,35 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("planning scan has not finished yet", "\n".join(lines))
         self.assertIn("encoded clips: unknown", "\n".join(lines))
 
+    def test_queued_status_shows_all_earlier_active_jobs(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with mock.patch.object(queueing, "DEFAULT_JOB_DIR", root), mock.patch.object(queueing, "pid_is_running", return_value=True):
+                for index, status in ((1, "running"), (2, "queued"), (3, "queued")):
+                    path = root / f"job-{index}.job.json"
+                    queueing.save_job(
+                        path,
+                        {
+                            "id": f"job-{index}",
+                            "status": status,
+                            "pid": 1000 + index,
+                            "queue_order": float(index),
+                            "job_file": str(path),
+                            "source": str(root / f"source-{index}"),
+                            "output": str(root / f"Output {index} (BD) (UHD converted)"),
+                            "plan": str(root / f"job-{index}.plan.json"),
+                            "log": str(root / f"job-{index}.log"),
+                            "exitcode": str(root / f"job-{index}.exitcode.txt"),
+                        },
+                    )
+
+                job = queueing.load_job(root / "job-3.job.json")
+                lines = "\n".join(queueing.job_status_lines(job, width=80))
+
+        self.assertIn("Queue: 2 earlier active jobs ahead", lines)
+        self.assertIn("Current blocker: job-1", lines)
+        self.assertIn("Also ahead: job-2", lines)
+
     def test_legacy_anime_cq18_alias_still_maps_to_compact_cq(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
             video_bps=12_000_000,

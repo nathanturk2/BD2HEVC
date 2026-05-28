@@ -347,6 +347,35 @@ def older_active_jobs(current_path: Path, current_job: dict[str, Any]) -> list[d
     return active
 
 
+def job_display_id(job: dict[str, Any]) -> str:
+    return str(job.get("id") or Path(str(job.get("output") or "")).name or Path(str(job.get("source") or "")).name or "(unknown job)")
+
+
+def queue_waiting_lines(job: dict[str, Any]) -> list[str]:
+    job_file = str(job.get("job_file") or "")
+    blockers: list[dict[str, Any]] = []
+    if job_file:
+        try:
+            blockers = older_active_jobs(Path(job_file), job)
+        except (OSError, ValueError):
+            blockers = []
+    if blockers:
+        count = len(blockers)
+        noun = "job" if count == 1 else "jobs"
+        lines = [f"Queue: {count} earlier active {noun} ahead"]
+        lines.append(f"Current blocker: {job_display_id(blockers[0])}")
+        if count > 1:
+            also_ahead = ", ".join(job_display_id(blocker) for blocker in blockers[1:4])
+            if count > 4:
+                also_ahead += f", +{count - 4} more"
+            lines.append(f"Also ahead: {also_ahead}")
+        return lines
+    waiting_for = job.get("waiting_for")
+    if waiting_for:
+        return [f"Current blocker: {waiting_for}"]
+    return []
+
+
 def wait_for_queue_turn(job_path: Path, job: dict[str, Any], log: Any) -> dict[str, Any]:
     while True:
         try:
@@ -465,8 +494,8 @@ def job_status_lines(job: dict[str, Any], *, width: int) -> list[str]:
         lines.append(f"Log: {job.get('log')}")
     else:
         lines.append(f"Status: {status}")
-        if status == "queued" and job.get("waiting_for"):
-            lines.append(f"Waiting for: {job.get('waiting_for')}")
+        if status == "queued":
+            lines.extend(queue_waiting_lines(job))
         lines.append(f"Log: {job.get('log')}")
     return lines
 
@@ -525,8 +554,9 @@ def cmd_jobs(args: argparse.Namespace) -> int:
         job["job_file"] = str(path)
         status = job_runtime_status(job)
         print(f"{job.get('id')}  {status}")
-        if status == "queued" and job.get("waiting_for"):
-            print(f"  waiting for: {job.get('waiting_for')}")
+        if status == "queued":
+            for line in queue_waiting_lines(job):
+                print(f"  {line}")
         if status == "paused":
             print("  waiting for: queue resume")
         print(f"  output: {job.get('output')}")
