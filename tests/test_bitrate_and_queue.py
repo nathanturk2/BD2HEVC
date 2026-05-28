@@ -1,4 +1,6 @@
 ﻿import argparse
+import contextlib
+import io
 import subprocess
 import json
 import unittest
@@ -11,6 +13,24 @@ from bd2hevc_app import bdj, bitrate, config, encoding, muxing, navigation, outp
 
 
 class ModuleSplitTests(unittest.TestCase):
+    def test_cli_help_points_to_command_specific_examples(self) -> None:
+        parser = bd.build_parser()
+        help_text = parser.format_help()
+
+        self.assertIn("Command help:", help_text)
+        self.assertIn("py bd2hevc.py <command> --help", help_text)
+        self.assertIn("py bd2hevc.py queue --help", help_text)
+
+        with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["queue", "--help"])
+            queue_help = buffer.getvalue()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("Examples:", queue_help)
+        self.assertIn('Examples:\n  py bd2hevc.py queue "BD backups', queue_help)
+        self.assertIn('py bd2hevc.py queue "BD backups', queue_help)
+
     def test_public_modules_import_core_helpers(self) -> None:
         self.assertEqual(config.VERSION, bd.VERSION)
         self.assertIs(bitrate.equivalent_hevc_bitrate, bd.equivalent_hevc_bitrate)

@@ -1355,16 +1355,46 @@ def add_vlc_compatibility_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--compat-patch-file", action="append", help="JSON file with custom JAR/class compatibility patches.")
 
 
+def command_parser(sub: argparse._SubParsersAction, name: str, *, help: str, description: str, examples: str) -> argparse.ArgumentParser:
+    return sub.add_parser(
+        name,
+        help=help,
+        description=description,
+        epilog="Examples:\n" + examples.strip("\n"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="BD2HEVC: convert local Blu-ray backups to HEVC while preserving menus, extras, audio, and subtitles.")
+    parser = argparse.ArgumentParser(
+        description="BD2HEVC: convert local Blu-ray backups to HEVC while preserving menus, extras, audio, and subtitles.",
+        epilog=(
+            "Common commands:\n"
+            "  py bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\"\n"
+            "  py bd2hevc.py status --watch\n"
+            "  py bd2hevc.py jobs\n"
+            "\n"
+            "Command help:\n"
+            "  py bd2hevc.py <command> --help\n"
+            "  py bd2hevc.py queue --help"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--version", action="version", version=f"BD2HEVC {VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_tools = sub.add_parser("tools", help="Show discovered external tools and NVENC support.")
+    p_tools = command_parser(sub, "tools", help="Show discovered external tools and NVENC support.", description="Show the external programs BD2HEVC found and whether hardware HEVC encoding is available.", examples="""
+  py bd2hevc.py tools
+  py bd2hevc.py tools --json
+""")
     p_tools.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools.set_defaults(func=cmd_tools)
 
-    p_scan = sub.add_parser("scan", help="Scan one or more BDMV backups with MakeMKV and FFprobe.")
+    p_scan = command_parser(sub, "scan", help="Scan one or more BDMV backups with MakeMKV and FFprobe.", description="Inspect Blu-ray backup folders before conversion and write scan reports.", examples="""
+  py bd2hevc.py scan "BD backups\\Movie Disc"
+  py bd2hevc.py scan "BD backups" --no-makemkv
+  py bd2hevc.py scan "BD backups\\Movie Disc" --accurate-video-bitrate
+""")
     p_scan.add_argument("paths", nargs="+", help="Disc folders or a parent folder containing disc folders.")
     p_scan.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
     p_scan.add_argument("--accurate-video-bitrate", action="store_true", help="Sum video packet sizes for bitrate. Slower, but best for encode planning.")
@@ -1373,11 +1403,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--verbose", action="store_true")
     p_scan.set_defaults(func=cmd_scan)
 
-    p_convert = sub.add_parser("convert", help="Convert a BD backup.")
+    p_convert = command_parser(sub, "convert", help="Convert a BD backup.", description="Legacy conversion command. For normal full-disc menu-preserving use, prefer 'auto', 'start', or 'queue'.", examples="""
+  py bd2hevc.py convert "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc"
+  py bd2hevc.py convert "BD backups\\Movie Disc" --mode clone-streams
+  py bd2hevc.py convert "BD backups\\Movie Disc" --mode movie-only --title 0
+""")
     add_convert_args(p_convert)
     p_convert.set_defaults(func=cmd_convert)
 
-    p_auto = sub.add_parser("auto", help="Faithful full-disc conversion. Only the source backup path is required.")
+    p_auto = command_parser(sub, "auto", help="Faithful full-disc conversion. Only the source backup path is required.", description="Run a foreground full-disc conversion that preserves menus, extras, subtitles, and audio by default.", examples="""
+  py bd2hevc.py auto "BD backups\\Movie Disc"
+  py bd2hevc.py auto "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py auto "BD backups\\Movie Disc" --bitrate-mode compact-cq --compact-cq-value 20 --audio-mode compact-stereo
+""")
     p_auto.add_argument("source", help="Source BD backup folder.")
     p_auto.add_argument("output", nargs="?", default=None, help="Output folder. Defaults to <source>_FULL_DISC_HEVC.")
     p_auto.add_argument("--fast-bitrate", action="store_true", help="Estimate video bitrate from container data instead of summing video packets.")
@@ -1402,7 +1440,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--verbose", action="store_true")
     p_auto.set_defaults(func=cmd_auto)
 
-    p_start = sub.add_parser("start", help="Start a full-disc conversion in the background.")
+    p_start = command_parser(sub, "start", help="Start a full-disc conversion in the background.", description="Start one background conversion job and return immediately with status commands.", examples="""
+  py bd2hevc.py start "BD backups\\Movie Disc" --name Movie_Disc
+  py bd2hevc.py start "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py start "BD backups\\Movie Disc" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
+""")
     p_start.add_argument("source", help="Source BD backup folder.")
     p_start.add_argument("output", nargs="?", default=None, help="Output folder. Defaults next to the source.")
     p_start.add_argument("--name", default=None, help="Friendly job id. Defaults to timestamp plus source folder name.")
@@ -1421,7 +1463,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--verbose", action="store_true")
     p_start.set_defaults(func=cmd_start)
 
-    p_queue = sub.add_parser("queue", help="Queue multiple full-disc conversions that run one at a time.")
+    p_queue = command_parser(sub, "queue", help="Queue multiple full-disc conversions that run one at a time.", description="Queue one or more source folders. Jobs run one at a time in the background.", examples="""
+  py bd2hevc.py queue "BD backups\\Movie Disc" --output-dir "Converted UHD-BD"
+  py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
+  py bd2hevc.py queue "Disc 1" "Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
+  py bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
+""")
     p_queue.add_argument("sources", nargs="+", help="Source BD backup folders or parent folders containing BDMV backups.")
     p_queue.add_argument("--output-dir", default=None, help="Put each converted output in this folder using '<Title> (BD) (UHD converted)' names.")
     p_queue.add_argument("--name-prefix", default=None, help="Prefix for generated job ids. Defaults to the current timestamp.")
@@ -1440,34 +1487,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_queue.add_argument("--verbose", action="store_true")
     p_queue.set_defaults(func=cmd_queue)
 
-    p_status = sub.add_parser("status", help="Show progress for a background conversion.")
+    p_status = command_parser(sub, "status", help="Show progress for a background conversion.", description="Show progress for the current job, a specific job, or the whole queue when watched without a job id.", examples="""
+  py bd2hevc.py status
+  py bd2hevc.py status --watch
+  py bd2hevc.py status 20260528-My_Movie --watch
+  py bd2hevc.py status 20260528-My_Movie --watch 5
+""")
     p_status.add_argument("job", nargs="?", default=None, help="Job id, output folder, or source folder. Defaults to the newest job.")
     p_status.add_argument("--watch", nargs="?", const=1.0, type=float, default=0, help="Refresh every N seconds. Defaults to 1 second when no interval is supplied.")
     p_status.add_argument("--width", type=int, default=32)
     p_status.set_defaults(func=cmd_status)
 
-    p_jobs = sub.add_parser("jobs", help="List recent background conversions.")
+    p_jobs = command_parser(sub, "jobs", help="List recent background conversions.", description="List running, queued, completed, failed, and canceled background jobs.", examples="""
+  py bd2hevc.py jobs
+  py bd2hevc.py jobs --limit 30
+""")
     p_jobs.add_argument("--limit", type=int, default=10)
     p_jobs.set_defaults(func=cmd_jobs)
 
-    p_pause = sub.add_parser("pause-queue", help="Pause the background queue after the current running job.")
+    p_pause = command_parser(sub, "pause-queue", help="Pause the background queue after the current running job.", description="Pause queued jobs. The currently running conversion is allowed to continue.", examples="""
+  py bd2hevc.py pause-queue
+  py bd2hevc.py pause-queue --reason "Need the GPU for something else"
+""")
     p_pause.add_argument("--reason", default=None, help="Optional note saved with the pause marker.")
     p_pause.set_defaults(func=cmd_pause_queue)
 
-    p_resume = sub.add_parser("resume-queue", help="Resume a paused background queue.")
+    p_resume = command_parser(sub, "resume-queue", help="Resume a paused background queue.", description="Resume jobs that were paused with pause-queue.", examples="""
+  py bd2hevc.py resume-queue
+""")
     p_resume.set_defaults(func=cmd_resume_queue)
 
-    p_cancel = sub.add_parser("cancel", help="Cancel a queued job. Use --kill to stop a running job.")
+    p_cancel = command_parser(sub, "cancel", help="Cancel a queued job. Use --kill to stop a running job.", description="Cancel a queued conversion. Use --kill only when you really want to stop a running conversion process.", examples="""
+  py bd2hevc.py cancel 20260528-My_Movie
+  py bd2hevc.py cancel "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py cancel 20260528-My_Movie --kill
+""")
     p_cancel.add_argument("job", help="Job id, output folder, or source folder.")
     p_cancel.add_argument("--kill", action="store_true", help="Stop a running conversion process tree.")
     p_cancel.set_defaults(func=cmd_cancel_job)
 
-    p_remove = sub.add_parser("remove", help="Remove a job from the queue/status list without deleting converted output.")
+    p_remove = command_parser(sub, "remove", help="Remove a job from the queue/status list without deleting converted output.", description="Hide an old job from BD2HEVC's job list. This does not delete the converted backup.", examples="""
+  py bd2hevc.py remove 20260528-My_Movie
+  py bd2hevc.py remove 20260528-My_Movie --kill
+""")
     p_remove.add_argument("job", help="Job id, output folder, or source folder.")
     p_remove.add_argument("--kill", action="store_true", help="Allow removal of a running job by stopping it first.")
     p_remove.set_defaults(func=cmd_remove_job)
 
-    p_validate = sub.add_parser("validate", help="Validate an output clip or BDMV folder.")
+    p_validate = command_parser(sub, "validate", help="Validate an output clip or BDMV folder.", description="Run structural and decode checks against an output clip, converted backup, or source backup.", examples="""
+  py bd2hevc.py validate "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py validate "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --reference "BD backups\\Movie Disc"
+  py bd2hevc.py validate "BD backups\\Movie Disc" --source-backup
+""")
     p_validate.add_argument("target")
     p_validate.add_argument("--source-backup", action="store_true", help="Validate a source BD backup without requiring HEVC output clips.")
     p_validate.add_argument("--reference", default=None, help="Original BD backup folder to compare matching stream audio and timestamps against.")
@@ -1478,7 +1549,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument("--verbose", action="store_true")
     p_validate.set_defaults(func=cmd_validate)
 
-    p_playlist = sub.add_parser("playlist-probe", help="Probe a Blu-ray playlist through libbluray/FFprobe and fail on stale CLPI packet maps.")
+    p_playlist = command_parser(sub, "playlist-probe", help="Probe a Blu-ray playlist through libbluray/FFprobe and fail on stale CLPI packet maps.", description="Probe one MPLS playlist through libbluray/FFprobe, useful when VLC progress or seeking looks wrong.", examples="""
+  py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23
+  py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23 --reference "BD backups\\Movie Disc"
+  py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23 --count-frames --decode-seconds 30
+""")
     p_playlist.add_argument("target", help="BD/UHD-BD backup folder.")
     p_playlist.add_argument("--playlist", type=int, required=True, help="MPLS playlist number, e.g. 23 for 00023.mpls.")
     p_playlist.add_argument("--reference", default=None, help="Original BD backup folder to compare playlist duration against.")
@@ -1492,13 +1567,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_playlist.add_argument("--report", default=None, help="Optional JSON report path.")
     p_playlist.set_defaults(func=cmd_playlist_probe)
 
-    p_metadata = sub.add_parser("patch-disc-metadata", help="Create fallback BD disc-library metadata when a backup is missing it.")
+    p_metadata = command_parser(sub, "patch-disc-metadata", help="Create fallback BD disc-library metadata when a backup is missing it.", description="Create simple BD disc-library metadata so VLC shows a disc title instead of a file URL.", examples="""
+  py bd2hevc.py patch-disc-metadata "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py patch-disc-metadata "Converted UHD-BD" --force
+  py bd2hevc.py patch-disc-metadata "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --title "Movie Disc"
+""")
     p_metadata.add_argument("paths", nargs="+", help="Disc folders or a parent folder containing disc folders.")
     p_metadata.add_argument("--title", default=None, help="Use this title for every patched disc. Defaults to a cleaned folder name.")
     p_metadata.add_argument("--force", action="store_true", help="Overwrite existing bdmt_*.xml metadata.")
     p_metadata.set_defaults(func=cmd_patch_disc_metadata)
 
-    p_patch = sub.add_parser("patch-navigation", help="Patch full-disc CLPI/MPLS descriptors for HEVC replacement clips.")
+    p_patch = command_parser(sub, "patch-navigation", help="Patch full-disc CLPI/MPLS descriptors for HEVC replacement clips.", description="Patch Blu-ray navigation metadata after HEVC replacement so players see the new video streams correctly.", examples="""
+  py bd2hevc.py patch-navigation "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --reference "BD backups\\Movie Disc"
+  py bd2hevc.py patch-navigation "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001 00002
+""")
     p_patch.add_argument("target")
     p_patch.add_argument("--clips", nargs="*", default=None, help="Clip filenames or ids to mark as HEVC. Defaults to HEVC clips over 10 seconds.")
     p_patch.add_argument("--reference", default=None, help="Original BD backup. When supplied, source CLPI files are restored, patched to HEVC, and their CPI packet maps are scaled to the output streams.")
@@ -1507,14 +1589,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_patch.add_argument("--verbose", action="store_true")
     p_patch.set_defaults(func=cmd_patch_navigation)
 
-    p_remux = sub.add_parser("remux-replacements", help="Remux existing HEVC replacement clips with the current converter M2TS authoring rules.")
+    p_remux = command_parser(sub, "remux-replacements", help="Remux existing HEVC replacement clips with the current converter M2TS authoring rules.", description="Rebuild replacement M2TS files without reencoding their existing HEVC video.", examples="""
+  py bd2hevc.py remux-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py remux-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001 00002
+""")
     p_remux.add_argument("source", help="Original BD backup folder.")
     p_remux.add_argument("output", help="Converted full-disc output folder.")
     p_remux.add_argument("--clips", nargs="*", default=None, help="Clip filenames or ids to remux. Defaults to HEVC clips over 10 seconds.")
     p_remux.add_argument("--verbose", action="store_true")
     p_remux.set_defaults(func=cmd_remux_replacements)
 
-    p_reencode = sub.add_parser("reencode-replacements", help="Reencode selected replacement clips in an existing full-disc output.")
+    p_reencode = command_parser(sub, "reencode-replacements", help="Reencode selected replacement clips in an existing full-disc output.", description="Reencode selected clips in an existing converted output, then remux and repatch navigation.", examples="""
+  py bd2hevc.py reencode-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001
+  py bd2hevc.py reencode-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001 --bitrate-mode compact-cq --compact-cq-value 20
+""")
     p_reencode.add_argument("source", help="Original BD backup folder.")
     p_reencode.add_argument("output", help="Converted full-disc output folder.")
     p_reencode.add_argument("--clips", nargs="+", required=True, help="Clip filenames or ids to reencode.")
@@ -1525,7 +1613,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_reencode.add_argument("--verbose", action="store_true")
     p_reencode.set_defaults(func=cmd_reencode_replacements)
 
-    p_repair = sub.add_parser("repair-output", help="Automatically repair an existing converted full-disc output.")
+    p_repair = command_parser(sub, "repair-output", help="Automatically repair an existing converted full-disc output.", description="Inspect and repair an existing converted backup using the current replacement and navigation rules.", examples="""
+  py bd2hevc.py repair-output "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py repair-output "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --dry-run
+  py bd2hevc.py repair-output "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001
+""")
     p_repair.add_argument("source", help="Original BD backup folder.")
     p_repair.add_argument("output", help="Converted full-disc output folder.")
     p_repair.add_argument("--clips", nargs="*", default=None, help="Optional clip filenames or ids to force-reencode. Defaults to wrong-bit-depth replacements.")
@@ -1538,13 +1630,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_repair.add_argument("--verbose", action="store_true")
     p_repair.set_defaults(func=cmd_repair_output)
 
-    p_vlc_patch = sub.add_parser("patch-vlc-compat", help="Apply modular VLC/libbluray compatibility fixes to an existing output.")
+    p_vlc_patch = command_parser(sub, "patch-vlc-compat", help="Apply modular VLC/libbluray compatibility fixes to an existing output.", description="Apply optional BD-J compatibility patches to an already converted backup.", examples="""
+  py bd2hevc.py patch-vlc-compat "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py patch-vlc-compat "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --vlc-fix topmenu-mark-zero-on-return
+  py bd2hevc.py patch-vlc-compat "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --vlc-compat off
+""")
     p_vlc_patch.add_argument("target", help="BD/UHD-BD backup folder.")
     add_vlc_compatibility_args(p_vlc_patch)
     p_vlc_patch.add_argument("--json", action="store_true", help="Print the full JSON report.")
     p_vlc_patch.set_defaults(func=cmd_patch_vlc_compat)
 
-    p_vlc = sub.add_parser("vlc-smoke", help="Headless VLC/libbluray startup smoke test; does not open a visible video window.")
+    p_vlc = command_parser(sub, "vlc-smoke", help="Headless VLC/libbluray startup smoke test; does not open a visible video window.", description="Run a short VLC startup test against a BD/UHD-BD backup without opening a visible VLC window.", examples="""
+  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --seconds 45 --video-plane
+  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --d3d11
+""")
     p_vlc.add_argument("target", help="BD/UHD-BD backup folder.")
     p_vlc.add_argument("--seconds", type=float, default=20.0, help="How long VLC should run before exiting.")
     p_vlc.add_argument("--log", default=None, help="VLC log path. Defaults to reports/<disc>.vlc_headless_smoke.log.")
@@ -1554,7 +1654,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_vlc.add_argument("--verbose", action="store_true")
     p_vlc.set_defaults(func=cmd_vlc_smoke)
 
-    p_progress = sub.add_parser("progress", help="Show a progress bar for a running full-disc conversion.")
+    p_progress = command_parser(sub, "progress", help="Show a progress bar for a running full-disc conversion.", description="Low-level progress command used by older workflows. For background jobs, prefer 'status --watch'.", examples="""
+  py bd2hevc.py progress "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --plan reports\\jobs\\job.plan.json
+  py bd2hevc.py progress "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --plan reports\\jobs\\job.plan.json --log reports\\jobs\\job.log --watch
+""")
     p_progress.add_argument("target", help="Output BD folder being written.")
     p_progress.add_argument("--plan", required=True, help="Dry-run JSON produced before the matching conversion.")
     p_progress.add_argument("--log", default=None, help="Optional conversion log for current-clip progress.")

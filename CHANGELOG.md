@@ -71,6 +71,8 @@
   and Windows file-replacement races while status is watching a running queue.
 - Clarified queued job status so later jobs show how many jobs are ahead
   instead of appearing to wait only behind the current running job.
+- Added command-specific CLI help examples, with top-level `--help` pointing
+  users to `py bd2hevc.py <command> --help`.
 - Improved generated output names with acronym and Roman numeral preservation,
   backed by CC0 acronym data plus media-specific terms.
 - Improved sparse silent menu/gallery clip detection so still-like video-only
