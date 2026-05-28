@@ -6,8 +6,112 @@ from pathlib import Path
 from typing import Any
 
 from .bitrate import bits_to_k, fps_to_rational, normalize_bitrate_mode, safe_float, safe_int
-from .config import ANIME_CQ_PRESET
+from .config import (
+    ANIME_CQ_PRESET,
+    AUDIO_MODES,
+    DEFAULT_AUDIO_MODE,
+    DEFAULT_MONO_AUDIO_BITRATE,
+    DEFAULT_STEREO_AUDIO_BITRATE,
+)
 from .tools import ToolError, require_tool, run_cmd
+
+
+def compact_audio_channels(audio: dict[str, Any]) -> int:
+    channels = safe_int(audio.get("channels"))
+    return 1 if channels == 1 else 2
+
+
+def append_compact_audio_options(
+    cmd: list[str],
+    clip_info: dict[str, Any],
+    *,
+    stereo_audio_bitrate: int,
+    mono_audio_bitrate: int,
+) -> None:
+    cmd.extend(["-c:a", "ac3"])
+    for index, audio in enumerate(clip_info.get("audio") or []):
+        channels = compact_audio_channels(audio)
+        bitrate = mono_audio_bitrate if channels == 1 else stereo_audio_bitrate
+        cmd.extend(
+            [
+                f"-ac:a:{index}",
+                str(channels),
+                f"-b:a:{index}",
+                bits_to_k(bitrate),
+                f"-ar:a:{index}",
+                "48000",
+            ]
+        )
+        language = audio.get("language")
+        if language:
+            cmd.extend([f"-metadata:s:a:{index}", f"language={language}"])
+
+
+def transcode_compact_audio_tracks(
+    input_path: Path,
+    output_prefix: Path,
+    clip_info: dict[str, Any],
+    tools: dict[str, Any],
+    *,
+    stereo_audio_bitrate: int = DEFAULT_STEREO_AUDIO_BITRATE,
+    mono_audio_bitrate: int = DEFAULT_MONO_AUDIO_BITRATE,
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    ffmpeg = require_tool(tools, "ffmpeg")
+    audio_streams = clip_info.get("audio") or []
+    outputs: list[dict[str, Any]] = []
+    if not audio_streams:
+        return outputs, []
+    output_prefix.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-y",
+        "-stats_period",
+        "1",
+        "-probesize",
+        "500M",
+        "-analyzeduration",
+        "500M",
+        "-i",
+        str(input_path),
+    ]
+    for index, audio in enumerate(audio_streams):
+        channels = compact_audio_channels(audio)
+        bitrate = mono_audio_bitrate if channels == 1 else stereo_audio_bitrate
+        output_path = output_prefix.with_name(f"{output_prefix.stem}.audio{index:02d}.ac3")
+        output_path.unlink(missing_ok=True)
+        cmd.extend(
+            [
+                "-map",
+                f"0:a:{index}",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-c:a",
+                "ac3",
+                "-ac",
+                str(channels),
+                "-b:a",
+                bits_to_k(bitrate),
+                "-ar",
+                "48000",
+                str(output_path),
+            ]
+        )
+        outputs.append(
+            {
+                "path": str(output_path),
+                "language": audio.get("language"),
+                "channels": channels,
+                "bitrate": bitrate,
+                "source_index": audio.get("index"),
+            }
+        )
+    if not dry_run:
+        run_cmd(cmd, check=True, capture=False, verbose=verbose)
+    return outputs, cmd
 
 
 def encode_to_hevc_m2ts(
@@ -22,10 +126,15 @@ def encode_to_hevc_m2ts(
     scale_uhd: bool = False,
     hevc_bit_depth: int = 8,
     encoder: str = "hevc_nvenc",
+    audio_mode: str = DEFAULT_AUDIO_MODE,
+    stereo_audio_bitrate: int = DEFAULT_STEREO_AUDIO_BITRATE,
+    mono_audio_bitrate: int = DEFAULT_MONO_AUDIO_BITRATE,
     dry_run: bool = False,
     verbose: bool = False,
 ) -> list[str]:
     ffmpeg = require_tool(tools, "ffmpeg")
+    if audio_mode not in AUDIO_MODES:
+        raise ToolError(f"Unsupported audio mode: {audio_mode}")
     video = clip_info.get("video") or {}
     target = video.get("target_hevc") or {}
     fps = video.get("fps") or 23.976
@@ -49,6 +158,8 @@ def encode_to_hevc_m2ts(
         ffmpeg,
         "-hide_banner",
         "-y",
+        "-stats_period",
+        "1",
         "-probesize",
         "500M",
         "-analyzeduration",
@@ -61,7 +172,9 @@ def encode_to_hevc_m2ts(
         cmd.extend(["-t", str(sample_seconds)])
     cmd.extend(["-map", "0:v:0"])
     if not video_only:
-        cmd.extend(["-map", "0:a?", "-map", "0:s?"])
+        cmd.extend(["-map", "0:a?"])
+        if audio_mode == DEFAULT_AUDIO_MODE:
+            cmd.extend(["-map", "0:s?"])
     filters = []
     if scale_uhd:
         filters.append("scale=3840:2160:flags=lanczos")
@@ -249,7 +362,16 @@ def encode_to_hevc_m2ts(
     if video_only:
         cmd.extend(["-f", "hevc", str(output_path)])
     else:
-        cmd.extend(["-c:a", "copy", "-c:s", "copy", "-mpegts_m2ts_mode", "1", str(output_path)])
+        if audio_mode == "compact-stereo":
+            append_compact_audio_options(
+                cmd,
+                clip_info,
+                stereo_audio_bitrate=stereo_audio_bitrate,
+                mono_audio_bitrate=mono_audio_bitrate,
+            )
+        else:
+            cmd.extend(["-c:a", "copy", "-c:s", "copy"])
+        cmd.extend(["-mpegts_m2ts_mode", "1", "-f", "mpegts", str(output_path)])
     if dry_run:
         return cmd
     output_path.parent.mkdir(parents=True, exist_ok=True)

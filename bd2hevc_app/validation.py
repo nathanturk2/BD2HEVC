@@ -34,6 +34,7 @@ def validate_clip(
     *,
     decode_seconds: float | None = None,
     require_hevc: str = "over-threshold",
+    audio_mode: str = "passthrough",
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"output": str(output_clip), "ok": False, "checks": []}
     out = inspect_clip(output_clip, tools, accurate_video_bitrate=False)
@@ -56,9 +57,38 @@ def validate_clip(
         result["checks"].append({"name": "short_clip_allowed", "ok": bool(out.get("ok")), "value": video.get("codec_name"), "duration": duration})
     if source_clip and source_clip.exists():
         src = inspect_clip(source_clip, tools, accurate_video_bitrate=False)
-        src_audio = [a.get("codec_name") for a in src.get("audio", [])]
-        out_audio = [a.get("codec_name") for a in out.get("audio", [])]
-        result["checks"].append({"name": "audio_codecs_passthrough", "ok": src_audio == out_audio, "source": src_audio, "output": out_audio})
+        src_audio = src.get("audio", [])
+        out_audio = out.get("audio", [])
+        if audio_mode == "compact-stereo":
+            result["checks"].append(
+                {
+                    "name": "compact_audio_track_count_matches_source",
+                    "ok": len(src_audio) == len(out_audio),
+                    "source_count": len(src_audio),
+                    "output_count": len(out_audio),
+                }
+            )
+            result["checks"].append(
+                {
+                    "name": "compact_audio_is_ac3",
+                    "ok": all(a.get("codec_name") == "ac3" for a in out_audio),
+                    "output": [a.get("codec_name") for a in out_audio],
+                }
+            )
+            channels_ok = True
+            channel_pairs = []
+            for src_stream, out_stream in zip(src_audio, out_audio):
+                source_channels = safe_int(src_stream.get("channels"))
+                expected_channels = 1 if source_channels == 1 else 2
+                output_channels = safe_int(out_stream.get("channels"))
+                channel_pairs.append({"source": source_channels, "expected": expected_channels, "output": output_channels})
+                if output_channels != expected_channels:
+                    channels_ok = False
+            result["checks"].append({"name": "compact_audio_channels", "ok": channels_ok, "channels": channel_pairs})
+        else:
+            src_audio_codecs = [a.get("codec_name") for a in src_audio]
+            out_audio_codecs = [a.get("codec_name") for a in out_audio]
+            result["checks"].append({"name": "audio_codecs_passthrough", "ok": src_audio_codecs == out_audio_codecs, "source": src_audio_codecs, "output": out_audio_codecs})
         src_start = reference_start_time(src)
         out_start = reference_start_time(out)
         if src_start is not None and out_start is not None:

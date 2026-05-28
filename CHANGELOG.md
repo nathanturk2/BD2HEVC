@@ -55,3 +55,21 @@
   `patch-vlc-compat` for existing outputs.
 - Generalized the validated BD-J top-menu compatibility fix so auto mode
   applies it only when the matching BD-J wrapper signature is present.
+- Added compact audio mode with AC-3 stereo/mono output for storage-limited
+  conversions, plus validation checks for compact audio stream count, codecs,
+  and channel layout.
+- Added `--main-title-cq` so compact CQ profiles can use a higher-quality CQ
+  for the longest movie/title while keeping extras at the general CQ.
+- Improved compact CQ behavior so it directly uses the requested CQ for all
+  reencoded clips at or above the duration threshold.
+- Improved progress reporting with separate encoding, audio, and muxing lanes,
+  one-second FFmpeg progress updates, and carriage-return FFmpeg stat parsing
+  so watch output no longer appears frozen during long clips.
+- Made queueing faster and cleaner by moving full plan generation into the
+  background job instead of creating a foreground placeholder plan.
+- Hardened queue job-file writes and reads against transient empty JSON files
+  and Windows file-replacement races while status is watching a running queue.
+- Improved generated output names with acronym and Roman numeral preservation,
+  backed by CC0 acronym data plus media-specific terms.
+- Improved sparse silent menu/gallery clip detection so still-like video-only
+  clips preserve their real source timing after conversion.

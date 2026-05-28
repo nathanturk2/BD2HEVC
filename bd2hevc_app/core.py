@@ -39,13 +39,18 @@ from .bitrate import (
     parse_rate,
     parse_timecode,
     safe_float,
+    safe_int,
 )
 from .config import (
-    BITRATE_MODES,
+    AUDIO_MODES,
     ANIME_CQ_VALUE,
+    BITRATE_MODES,
     DEFAULT_ANIME_CQ_MIN_DURATION,
+    DEFAULT_AUDIO_MODE,
     DEFAULT_MAKEMKV_TIMEOUT_SECONDS,
+    DEFAULT_MONO_AUDIO_BITRATE,
     DEFAULT_REPORT_DIR,
+    DEFAULT_STEREO_AUDIO_BITRATE,
     DEFAULT_VLC_COMPATIBILITY_MODE,
     HEVC_ENCODERS,
     KNOWN_VLC_COMPATIBILITY_FIXES,
@@ -58,7 +63,7 @@ from .config import (
     SPARSE_TIMING_MIN_RATIO,
     VERSION,
 )
-from .encoding import encode_to_hevc_m2ts
+from .encoding import encode_to_hevc_m2ts, transcode_compact_audio_tracks
 from .muxing import (
     author_m2ts_split,
     author_uhdbd_split,
@@ -137,6 +142,47 @@ def use_makemkv_from_args(args: argparse.Namespace) -> bool:
     if getattr(args, "no_makemkv", False):
         return False
     return bool(getattr(args, "makemkv", False) or getattr(args, "require_makemkv", False))
+
+
+def audio_mode_from_args(args: argparse.Namespace) -> str:
+    return str(getattr(args, "audio_mode", DEFAULT_AUDIO_MODE) or DEFAULT_AUDIO_MODE)
+
+
+def stereo_audio_bitrate_from_args(args: argparse.Namespace) -> int:
+    return int(getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE) or DEFAULT_STEREO_AUDIO_BITRATE)
+
+
+def mono_audio_bitrate_from_args(args: argparse.Namespace) -> int:
+    return int(getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE) or DEFAULT_MONO_AUDIO_BITRATE)
+
+
+def apply_main_title_cq_override(clips: list[dict[str, Any]], cq_value: int | None) -> dict[str, Any] | None:
+    if cq_value is None:
+        return None
+    if cq_value < 0 or cq_value > 51:
+        raise ToolError("--main-title-cq must be between 0 and 51")
+    candidates = [
+        clip
+        for clip in clips
+        if clip.get("action") == "reencode"
+        and (((clip.get("video") or {}).get("target_hevc") or {}).get("rate_control") == "cq")
+    ]
+    main_clip = max(candidates, key=lambda item: float(item.get("duration") or 0), default=None)
+    if not main_clip:
+        return None
+    target = ((main_clip.get("video") or {}).get("target_hevc") or {})
+    previous = safe_int(target.get("cq"))
+    target["cq"] = cq_value
+    target["compact_cq_value"] = cq_value
+    target["main_title_cq_override"] = True
+    reason = target.get("reason")
+    target["reason"] = f"{reason}; main title CQ override {previous} -> {cq_value}" if reason else f"main title CQ override {previous} -> {cq_value}"
+    return {
+        "file": main_clip.get("file"),
+        "duration": main_clip.get("duration"),
+        "previous_cq": previous,
+        "cq": cq_value,
+    }
 
 def extract_title_with_makemkv(source: Path, title_id: int, destination: Path, tools: dict[str, Any], *, dry_run: bool, verbose: bool) -> Path:
     exe = tools.get("makemkvcon64") or tools.get("makemkvcon")
@@ -278,6 +324,7 @@ def clone_clip_context(source: Path, output: Path, clip: dict[str, Any]) -> dict
     output_clpi = output / "BDMV" / "CLIPINF" / f"{Path(clip['file']).stem}.clpi"
     backup_clpi = output / "BDMV" / "BACKUP" / "CLIPINF" / f"{Path(clip['file']).stem}.clpi"
     temp_video = output_path.with_suffix(".hevc.tmp")
+    temp_audio_prefix = output_path.with_suffix(".compact-audio")
     return {
         "clip": clip,
         "file": clip["file"],
@@ -286,6 +333,43 @@ def clone_clip_context(source: Path, output: Path, clip: dict[str, Any]) -> dict
         "output_clpi": output_clpi,
         "backup_clpi": backup_clpi,
         "temp_video": temp_video,
+        "temp_audio_prefix": temp_audio_prefix,
+    }
+
+
+def clone_streams_plan_payload(
+    source: Path,
+    output: Path,
+    args: argparse.Namespace,
+    bitrate_options: dict[str, Any],
+    main_title_cq_override: dict[str, Any] | None,
+    clips: list[dict[str, Any]],
+    *,
+    planning_pending: bool = False,
+) -> dict[str, Any]:
+    return {
+        "mode": "clone-streams",
+        "warning": "full-disc mode preserves the original menu/extras structure and patches replacement-video navigation metadata",
+        "source": str(source),
+        "output": str(output),
+        "hevc_bit_depth": args.hevc_bit_depth,
+        "encoder": selected_hevc_encoder(args),
+        "bitrate": bitrate_options,
+        "main_title_cq_override": main_title_cq_override,
+        "audio": {
+            "mode": audio_mode_from_args(args),
+            "stereo_bitrate": stereo_audio_bitrate_from_args(args),
+            "mono_bitrate": mono_audio_bitrate_from_args(args),
+        },
+        "patch_navigation": args.patch_navigation,
+        "bdj_compatibility_patches": bool(getattr(args, "bdj_compatibility_patches", False)),
+        "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
+        "vlc_fixes": compatibility_fix_names_from_args(args),
+        "custom_compatibility_patch_files": [str(path) for path in custom_compatibility_patch_files_from_args(args)],
+        "encode_ahead": encoder_is_hardware(selected_hevc_encoder(args)) and not getattr(args, "no_encode_ahead", False),
+        "encode_ahead_depth": getattr(args, "encode_ahead_depth", 3),
+        "planning_pending": planning_pending,
+        "reencode_clips": [clip_summary(c) for c in clips],
     }
 
 
@@ -311,6 +395,25 @@ def encode_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: 
 
 
 def finalize_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    compact_audio = audio_mode_from_args(args) == "compact-stereo"
+    if compact_audio:
+        progress_event("audio-start", ctx["file"])
+        try:
+            audio_tracks, _audio_cmd = transcode_compact_audio_tracks(
+                ctx["input_path"],
+                ctx["temp_audio_prefix"],
+                ctx["clip"],
+                tools,
+                stereo_audio_bitrate=stereo_audio_bitrate_from_args(args),
+                mono_audio_bitrate=mono_audio_bitrate_from_args(args),
+                dry_run=False,
+                verbose=args.verbose,
+            )
+            ctx["compact_audio_tracks"] = audio_tracks
+        except Exception:
+            progress_event("audio-failed", ctx["file"])
+            raise
+        progress_event("audio-done", ctx["file"])
     progress_event("mux-start", ctx["file"])
     try:
         author_m2ts_split(
@@ -319,6 +422,7 @@ def finalize_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args
             ctx["output_path"],
             ctx["clip"],
             tools,
+            compact_audio_tracks=ctx.get("compact_audio_tracks") if compact_audio else None,
             reference_clip_info=ctx["clip"],
             verbose=args.verbose,
         )
@@ -331,7 +435,16 @@ def finalize_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args
         ctx["backup_clpi"].parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ctx["output_clpi"], ctx["backup_clpi"])
     ctx["temp_video"].unlink(missing_ok=True)
-    validation = validate_clip(ctx["input_path"], ctx["output_path"], tools, decode_seconds=args.decode_sample, require_hevc="always")
+    for audio in ctx.get("compact_audio_tracks") or []:
+        Path(str(audio.get("path") or "")).unlink(missing_ok=True)
+    validation = validate_clip(
+        ctx["input_path"],
+        ctx["output_path"],
+        tools,
+        decode_seconds=args.decode_sample,
+        require_hevc="always",
+        audio_mode=audio_mode_from_args(args),
+    )
     progress_event("validate-done", ctx["file"])
     return validation
 
@@ -434,25 +547,22 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         use_makemkv=use_makemkv_from_args(args),
         verbose=args.verbose,
     )
+    main_title_cq_override = apply_main_title_cq_override(scan.get("clips", []), getattr(args, "main_title_cq", None))
     clips = [c for c in scan.get("clips", []) if c.get("action") == "reencode"]
+    progress_plan_path = path_or_none(getattr(args, "progress_plan", None))
+    plan_payload = clone_streams_plan_payload(
+        source,
+        output,
+        args,
+        bitrate_options,
+        main_title_cq_override,
+        clips,
+    )
+    if progress_plan_path:
+        progress_plan_path.parent.mkdir(parents=True, exist_ok=True)
+        save_job(progress_plan_path, plan_payload)
     if args.dry_run:
-        return {
-            "mode": "clone-streams",
-            "warning": "full-disc mode preserves the original menu/extras structure and patches replacement-video navigation metadata",
-            "source": str(source),
-            "output": str(output),
-            "hevc_bit_depth": args.hevc_bit_depth,
-            "encoder": selected_hevc_encoder(args),
-            "bitrate": bitrate_options,
-            "patch_navigation": args.patch_navigation,
-            "bdj_compatibility_patches": bool(getattr(args, "bdj_compatibility_patches", False)),
-            "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
-            "vlc_fixes": compatibility_fix_names_from_args(args),
-            "custom_compatibility_patch_files": [str(path) for path in custom_compatibility_patch_files_from_args(args)],
-            "encode_ahead": encoder_is_hardware(selected_hevc_encoder(args)) and not getattr(args, "no_encode_ahead", False),
-            "encode_ahead_depth": getattr(args, "encode_ahead_depth", 3),
-            "reencode_clips": [clip_summary(c) for c in clips],
-        }
+        return plan_payload
     copy_report = copy_disc_tree_skipping_reencoded_streams(source, output, {str(clip.get("file")) for clip in clips})
     disc_metadata = ensure_disc_library_metadata(output)
     validations = []
@@ -530,6 +640,12 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         "hevc_bit_depth": args.hevc_bit_depth,
         "encoder": encoder,
         "bitrate": bitrate_options,
+        "main_title_cq_override": main_title_cq_override,
+        "audio": {
+            "mode": audio_mode_from_args(args),
+            "stereo_bitrate": stereo_audio_bitrate_from_args(args),
+            "mono_bitrate": mono_audio_bitrate_from_args(args),
+        },
         "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
         "vlc_fixes": selected_vlc_fixes,
         "custom_compatibility_patch_files": [str(path) for path in custom_patch_files],
@@ -1132,21 +1248,7 @@ def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -
     paths = job_paths(job_id)
     if paths["job"].exists() and not getattr(args, "force_job", False):
         raise ToolError(f"Job already exists: {job_id}. Use a different --name.")
-    plan_args = copy.copy(args)
-    plan_args.output = str(output)
-    plan_args.mode = "clone-streams"
-    plan_args.uhd_scale = False
-    plan_args.skip_audio = False
-    plan_args.skip_subtitles = False
-    plan_args.patch_navigation = not args.no_patch_navigation
-    plan_args.bdj_compatibility_patches = not args.no_bdj_compatibility_patches
-    plan_args.dry_run = True
-    plan_args.no_progress = True
-    if announce:
-        print(f"Planning {source.name}...", flush=True)
-    plan = convert_clone_streams(plan_args, tools)
-    paths["plan"].write_text(json.dumps(plan, indent=2), encoding="utf-8")
-    command = auto_command_for_job(args, output, paths["report"])
+    command = auto_command_for_job(args, output, paths["report"], paths["plan"])
     queue_order = time.time()
     job = {
         "id": job_id,
@@ -1161,7 +1263,7 @@ def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -
         "exitcode": str(paths["exitcode"]),
         "job_file": str(paths["job"]),
         "command": command,
-        "reencode_clip_count": len(plan.get("reencode_clips") or []),
+        "reencode_clip_count": None,
     }
     save_job(paths["job"], job)
     pid = start_background_process(paths["job"])
@@ -1225,6 +1327,7 @@ def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bufsize-multiplier", type=float, default=2.0, help="VBV buffer multiplier relative to maxrate.")
     parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for reencoded clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
     parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Defaults to the 10-second reencode threshold. Raise it if only episode/movie-length clips should use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
+    parser.add_argument("--main-title-cq", type=int, default=None, help="Override compact-cq for the longest reencoded clip. Lower is larger/higher quality; useful for CQ20 extras with a CQ18 main movie.")
 
 
 def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: bool = False) -> None:
@@ -1232,6 +1335,12 @@ def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: b
     if include_encode_ahead:
         parser.add_argument("--no-encode-ahead", action="store_true", help="Disable hardware encode-ahead pipelining and run encode/mux serially.")
         parser.add_argument("--encode-ahead-depth", type=int, default=3, help="Maximum completed HEVC temp clips allowed to wait for the single muxer. Hardware encoders only; default 3.")
+
+
+def add_audio_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--audio-mode", choices=AUDIO_MODES, default=DEFAULT_AUDIO_MODE, help="Audio handling for reencoded clips. passthrough keeps source audio; compact-stereo converts every audio track to AC-3 stereo, or mono when the source stream is mono.")
+    parser.add_argument("--stereo-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_STEREO_AUDIO_BITRATE, help="Bitrate for compact-stereo two-channel AC-3 audio. Default 256k.")
+    parser.add_argument("--mono-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_MONO_AUDIO_BITRATE, help="Bitrate for compact-stereo mono AC-3 audio. Default 128k.")
 
 
 def add_makemkv_args(parser: argparse.ArgumentParser) -> None:
@@ -1276,7 +1385,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth. 8 preserves 8-bit BD sources and is VLC-friendly; use 10 for explicit Main10 output.")
     add_encoder_args(p_auto, include_encode_ahead=True)
     add_bitrate_args(p_auto)
+    add_audio_args(p_auto)
     p_auto.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
+    p_auto.add_argument("--progress-plan", default=None, help=argparse.SUPPRESS)
     p_auto.add_argument("--staging-dir", default=None)
     p_auto.add_argument("--keep-staging", action="store_true")
     p_auto.add_argument("--force", action="store_true", help="Replace an existing output folder.")
@@ -1300,6 +1411,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth.")
     add_encoder_args(p_start, include_encode_ahead=True)
     add_bitrate_args(p_start)
+    add_audio_args(p_start)
     p_start.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
     p_start.add_argument("--force", action="store_true", help="Replace an existing output folder.")
     add_makemkv_args(p_start)
@@ -1318,6 +1430,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_queue.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth.")
     add_encoder_args(p_queue, include_encode_ahead=True)
     add_bitrate_args(p_queue)
+    add_audio_args(p_queue)
     p_queue.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
     p_queue.add_argument("--force", action="store_true", help="Replace existing output folders.")
     add_makemkv_args(p_queue)

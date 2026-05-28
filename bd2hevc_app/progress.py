@@ -74,9 +74,11 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
     markers = list(marker_pattern.finditer(text))
     if markers:
         encode_starts: dict[str, re.Match[str]] = {}
+        audio_starts: dict[str, re.Match[str]] = {}
         mux_starts: dict[str, re.Match[str]] = {}
         encode_done: set[str] = set()
         encoded_done: list[str] = []
+        audio_done: set[str] = set()
         mux_done: set[str] = set()
         validate_done: list[str] = []
         pipeline_mode = None
@@ -92,6 +94,11 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
                 encode_done.add(clip_file)
                 if event == "encode-done" and clip_file not in encoded_done:
                     encoded_done.append(clip_file)
+            elif event == "audio-start":
+                audio_starts[clip_file] = marker
+                audio_done.discard(clip_file)
+            elif event in {"audio-done", "audio-failed"}:
+                audio_done.add(clip_file)
             elif event == "mux-start":
                 mux_starts[clip_file] = marker
                 mux_done.discard(clip_file)
@@ -101,6 +108,7 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
                 validate_done.append(clip_file)
                 mux_done.add(clip_file)
         active_encode = next((clip for clip, marker in sorted(encode_starts.items(), key=lambda item: item[1].start(), reverse=True) if clip not in encode_done), None)
+        active_audio = next((clip for clip, marker in sorted(audio_starts.items(), key=lambda item: item[1].start(), reverse=True) if clip not in audio_done), None)
         active_mux = next((clip for clip, marker in sorted(mux_starts.items(), key=lambda item: item[1].start(), reverse=True) if clip not in mux_done), None)
 
         def marker_segment(start_event: str, clip_file: str | None, done_events: set[str]) -> str:
@@ -113,21 +121,36 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
             return text[start.end() : (end.start() if end else len(text))]
 
         encode_segment = marker_segment("encode-start", active_encode, {"encode-done", "encode-failed"})
+        audio_segment = marker_segment("audio-start", active_audio, {"audio-done", "audio-failed"})
         mux_segment = marker_segment("mux-start", active_mux, {"mux-done", "mux-failed"})
-        encode_times = re.findall(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", encode_segment)
+        encode_times = re.findall(r"(?:^|[\r\n])\s*frame=.*?time=(\d{2}:\d{2}:\d{2}\.\d{2})", encode_segment)
         encode_seconds = parse_timecode(encode_times[-1]) if encode_times else None
-        mux_matches = re.findall(r"(?m)^\s*(\d+(?:\.\d+)?)%\s+complete\s*$", mux_segment)
+        audio_times = re.findall(r"(?:^|[\r\n])\s*size=.*?time=(\d{2}:\d{2}:\d{2}\.\d{2})", audio_segment)
+        audio_seconds = parse_timecode(audio_times[-1]) if audio_times else None
+        mux_matches = re.findall(r"(?:^|[\r\n])\s*(\d+(?:\.\d+)?)%\s+complete\s*(?=[\r\n]|$)", mux_segment)
         mux_percent = safe_float(mux_matches[-1]) if mux_matches else None
         speed_matches = re.findall(r"speed=\s*([0-9.]+x)", encode_segment)
         encode_speed = speed_matches[-1] if speed_matches else None
-        current_stage = "muxing + encoding" if active_mux and active_encode else ("remuxing" if active_mux else ("encoding" if active_encode else None))
+        audio_speed_matches = re.findall(r"(?:^|[\r\n])\s*size=.*?speed=\s*([0-9.]+x)", audio_segment)
+        audio_speed = audio_speed_matches[-1] if audio_speed_matches else None
+        stage_parts = []
+        if active_mux:
+            stage_parts.append("muxing")
+        if active_audio:
+            stage_parts.append("audio")
+        if active_encode:
+            stage_parts.append("encoding")
+        current_stage = " + ".join(stage_parts) if stage_parts else None
         return {
-            "current_file": active_mux or active_encode,
-            "current_seconds": encode_seconds if not active_mux else None,
+            "current_file": active_mux or active_audio or active_encode,
+            "current_seconds": None if active_mux else (audio_seconds if active_audio else encode_seconds),
             "current_stage": current_stage,
-            "current_speed": encode_speed,
+            "current_speed": audio_speed if active_audio and not active_encode else encode_speed,
             "mux_file": active_mux,
             "mux_percent": mux_percent,
+            "audio_file": active_audio,
+            "audio_seconds": audio_seconds,
+            "audio_speed": audio_speed,
             "encode_file": active_encode,
             "encode_seconds": encode_seconds,
             "encode_speed": encode_speed,
@@ -241,12 +264,16 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
         done = list(dict.fromkeys(done))
         encoded = list(dict.fromkeys(encoded))
     mux_file = log_state.get("mux_file")
+    audio_file = log_state.get("audio_file")
     encode_file = log_state.get("encode_file")
     current_file = log_state.get("current_file")
     current_seconds = float(log_state.get("current_seconds") or 0)
     current_duration = 0.0
     current_percent = 0.0
     mux_percent = log_state.get("mux_percent")
+    audio_seconds = float(log_state.get("audio_seconds") or 0)
+    audio_percent = 0.0
+    audio_duration = 0.0
     encode_seconds = float(log_state.get("encode_seconds") or 0)
     encode_percent = 0.0
     encode_duration = 0.0
@@ -264,6 +291,10 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
         encode_duration = next((float(clip.get("duration") or 0) for clip in clips if clip["file"] == encode_file), 0)
         encode_seconds = min(encode_seconds, encode_duration)
         encode_percent = clamp_percent(encode_seconds / encode_duration * 100.0) if encode_duration else 0.0
+    if audio_file and audio_file not in done:
+        audio_duration = next((float(clip.get("duration") or 0) for clip in clips if clip["file"] == audio_file), 0)
+        audio_seconds = min(audio_seconds, audio_duration)
+        audio_percent = clamp_percent(audio_seconds / audio_duration * 100.0) if audio_duration else 0.0
     encoded_current_seconds = 0.0
     if encode_file and encode_file not in encoded:
         encoded_current_seconds = encode_seconds
@@ -286,12 +317,17 @@ def progress_lines(args: argparse.Namespace, *, inspect_outputs: bool = True) ->
     if mux_file and mux_file not in done:
         details = f"muxing:  {mux_file}  {progress_bar(current_percent, min(args.width, 24))} {current_percent:5.1f}%  {format_duration(current_seconds)} / {format_duration(current_duration)}"
         lines.append(details)
+    if audio_file and audio_file not in done:
+        details = f"audio:   {audio_file:>11}  {progress_bar(audio_percent, min(args.width, 24))} {audio_percent:5.1f}%  {format_duration(audio_seconds)} / {format_duration(audio_duration)}"
+        if log_state.get("audio_speed"):
+            details += f"  speed: {log_state['audio_speed']}"
+        lines.append(details)
     if encode_file and encode_file not in done and encode_file != mux_file:
         details = f"encoding:{encode_file:>11}  {progress_bar(encode_percent, min(args.width, 24))} {encode_percent:5.1f}%  {format_duration(encode_seconds)} / {format_duration(encode_duration)}"
         if log_state.get("encode_speed"):
             details += f"  speed: {log_state['encode_speed']}"
         lines.append(details)
-    if current_file and current_file not in done and not mux_file and not encode_file:
+    if current_file and current_file not in done and not mux_file and not audio_file and not encode_file:
         details = f"current: {current_file}  {progress_bar(current_percent, min(args.width, 24))} {current_percent:5.1f}%  {format_duration(current_seconds)} / {format_duration(current_duration)}"
         if log_state.get("current_speed"):
             details += f"  speed: {log_state['current_speed']}"

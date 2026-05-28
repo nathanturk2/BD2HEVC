@@ -25,7 +25,8 @@ def make_output_available(output: Path, source: Path, *, force: bool) -> None:
     if output.exists():
         if not force:
             raise ToolError(f"Output already exists: {output}. Use --force to replace it.")
-        if len(output.parts) < 4:
+        generated_disc_name = "(uhd converted)" in output.name.lower()
+        if len(output.parts) < 4 and not (len(output.parts) >= 3 and generated_disc_name):
             raise ToolError(f"Refusing to remove suspicious output path: {output}")
         if output.is_dir():
             shutil.rmtree(output)
@@ -186,6 +187,105 @@ def xml_escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+TITLE_LOWERCASE_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "but",
+    "by",
+    "for",
+    "from",
+    "in",
+    "into",
+    "nor",
+    "of",
+    "on",
+    "or",
+    "per",
+    "the",
+    "to",
+    "via",
+    "vs",
+    "with",
+}
+
+FALLBACK_TITLE_ACRONYMS = {
+    "AC3",
+    "BBC",
+    "BD",
+    "BDMV",
+    "DTS",
+    "DVD",
+    "HD",
+    "HEVC",
+    "OVA",
+    "UHD",
+    "UK",
+    "USA",
+}
+
+ROMAN_NUMERAL_RE = re.compile(r"M{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})", re.IGNORECASE)
+
+
+def load_title_acronyms() -> set[str]:
+    path = Path(__file__).with_name("data") / "title_acronyms.txt"
+    acronyms = set(FALLBACK_TITLE_ACRONYMS)
+    try:
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            token = line.strip()
+            if not token or token.startswith("#"):
+                continue
+            if re.fullmatch(r"[A-Z][A-Z0-9]{1,15}", token):
+                acronyms.add(token)
+    except OSError:
+        pass
+    return acronyms
+
+
+TITLE_ACRONYMS = load_title_acronyms()
+
+
+def is_roman_numeral(value: str) -> bool:
+    return bool(value) and bool(ROMAN_NUMERAL_RE.fullmatch(value)) and any(ch in value.upper() for ch in "IVXLCDM")
+
+
+def should_use_acronym_case(core: str, title_has_lowercase: bool) -> bool:
+    upper = core.upper()
+    if upper not in TITLE_ACRONYMS:
+        return False
+    if core == upper or not title_has_lowercase:
+        return True
+    return len(core) >= 3 and core.islower()
+
+
+def smart_title_word(word: str, index: int, total: int, *, title_has_lowercase: bool) -> str:
+    match = re.fullmatch(r"([^A-Za-z0-9]*)([A-Za-z0-9]+(?:'[A-Za-z0-9]+)?)([^A-Za-z0-9]*)", word)
+    if not match:
+        return word
+    prefix, core, suffix = match.groups()
+    upper = core.upper()
+    lower = core.lower()
+    if is_roman_numeral(upper) or should_use_acronym_case(core, title_has_lowercase):
+        normalized = upper
+    elif core == upper and not title_has_lowercase and len(core) <= 3 and lower not in TITLE_LOWERCASE_WORDS:
+        normalized = upper
+    elif re.fullmatch(r"[A-Z]+\d+[A-Z0-9]*|\d+[A-Z]+[A-Z0-9]*", upper):
+        normalized = upper
+    elif 0 < index < total - 1 and lower in TITLE_LOWERCASE_WORDS:
+        normalized = lower
+    else:
+        normalized = core[:1].upper() + core[1:].lower()
+    return f"{prefix}{normalized}{suffix}"
+
+
+def smart_title_case(title: str) -> str:
+    words = title.split()
+    title_has_lowercase = any(ch.islower() for ch in title)
+    return " ".join(smart_title_word(word, index, len(words), title_has_lowercase=title_has_lowercase) for index, word in enumerate(words))
+
+
 def disc_title_from_folder_name(name: str) -> str:
     title = name
     title = re.sub(r"\s*\(BD\)\s*\(UHD converted\)\s*$", "", title, flags=re.IGNORECASE)
@@ -193,9 +293,8 @@ def disc_title_from_folder_name(name: str) -> str:
     title = re.sub(r"\s*\(BD\)\s*$", "", title, flags=re.IGNORECASE)
     title = re.sub(r"_(FULL_DISC_HEVC|UHDBD.*)$", "", title, flags=re.IGNORECASE)
     title = title.replace("_", " ").strip(" .-_")
-    if title and title.upper() == title:
-        title = title.title()
     title = re.sub(r"\s+", " ", title).strip()
+    title = smart_title_case(title) if title else title
     return title or "Blu-ray Disc"
 
 

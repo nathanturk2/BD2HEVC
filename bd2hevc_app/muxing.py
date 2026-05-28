@@ -143,9 +143,12 @@ def write_tsmuxer_m2ts_split_meta(
     tools: dict[str, Any],
     *,
     video_track_id: str | None = None,
+    audio_tracks_input: Path | None = None,
+    compact_audio_tracks: list[dict[str, Any]] | None = None,
     start_time_seconds: float | None = None,
 ) -> list[dict[str, str]]:
     tracks = parse_tsmuxer_tracks(tracks_input, tools)
+    audio_tracks = parse_tsmuxer_tracks(audio_tracks_input, tools) if audio_tracks_input else tracks
     video = clip_info.get("video") or {}
     fps = video.get("fps") or 23.976
     width = video.get("width") or 1920
@@ -159,9 +162,34 @@ def write_tsmuxer_m2ts_split_meta(
     if video_track_id:
         video_options.insert(0, f"track={video_track_id}")
     lines.append(f"V_MPEGH/ISO/HEVC, {quote_meta_path(video_input)}, " + ", ".join(video_options))
+    if compact_audio_tracks is not None:
+        for audio in compact_audio_tracks:
+            audio_path = Path(str(audio.get("path") or ""))
+            if not audio_path:
+                continue
+            options = []
+            lang = audio.get("language")
+            if lang:
+                options.append(f"lang={lang}")
+            suffix = ", " + ", ".join(options) if options else ""
+            lines.append(f"A_AC3, {quote_meta_path(audio_path)}{suffix}")
+    else:
+        for track in audio_tracks:
+            stream_id = track.get("stream_id", "")
+            if stream_id.startswith("V_") or not stream_id.startswith("A_"):
+                continue
+            track_id = track.get("track")
+            if not track_id:
+                continue
+            lang = track.get("stream_lang")
+            options = [f"track={track_id}"]
+            if lang:
+                options.append(f"lang={lang}")
+            source = audio_tracks_input or tracks_input
+            lines.append(f"{stream_id}, {quote_meta_path(source)}, " + ", ".join(options))
     for track in tracks:
         stream_id = track.get("stream_id", "")
-        if stream_id.startswith("V_"):
+        if stream_id.startswith("V_") or stream_id.startswith("A_"):
             continue
         track_id = track.get("track")
         if not track_id:
@@ -172,7 +200,7 @@ def write_tsmuxer_m2ts_split_meta(
             options.append(f"lang={lang}")
         if stream_id == "S_HDMV/PGS":
             options.extend([f"fps={fps:.3f}", f"video-width={width}", f"video-height={height}"])
-        elif not stream_id.startswith("A_"):
+        else:
             continue
         lines.append(f"{stream_id}, {quote_meta_path(tracks_input)}, " + ", ".join(options))
     meta_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -187,6 +215,8 @@ def author_m2ts_split(
     tools: dict[str, Any],
     *,
     video_track_id: str | None = None,
+    audio_tracks_input: Path | None = None,
+    compact_audio_tracks: list[dict[str, Any]] | None = None,
     reference_clip_info: dict[str, Any] | None = None,
     verbose: bool = False,
 ) -> Path:
@@ -199,6 +229,8 @@ def author_m2ts_split(
         clip_info,
         tools,
         video_track_id=video_track_id,
+        audio_tracks_input=audio_tracks_input,
+        compact_audio_tracks=compact_audio_tracks,
         start_time_seconds=reference_start_time(reference_clip_info or clip_info),
     )
     run_cmd([tsmuxer, str(meta_path), str(output_m2ts)], check=True, capture=False, verbose=verbose)

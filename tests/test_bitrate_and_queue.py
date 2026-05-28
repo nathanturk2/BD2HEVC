@@ -49,6 +49,22 @@ class ModuleSplitTests(unittest.TestCase):
             state = progress.latest_log_progress(log)
             self.assertEqual(state["done_files"], ["00000.m2ts", "00001.m2ts"])
 
+    def test_ffmpeg_carriage_return_stats_update_current_encode_time(self) -> None:
+        with TemporaryDirectory() as temp:
+            log = Path(temp) / "job.log"
+            log.write_text(
+                "BD2HEVC_PROGRESS encode-start 00001.m2ts\r"
+                "frame= 100 time=00:00:04.00 speed=8.0x\r"
+                "frame= 200 time=00:00:08.00 speed=9.0x\r",
+                encoding="utf-8",
+            )
+
+            state = progress.latest_log_progress(log)
+
+        self.assertEqual(state["encode_file"], "00001.m2ts")
+        self.assertEqual(state["encode_seconds"], 8.0)
+        self.assertEqual(state["encode_speed"], "9.0x")
+
     def test_top_progress_tracks_encoding_not_active_mux(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -86,6 +102,38 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("60.0% encoded", lines[0])
         self.assertIn("encoded clips: 1/2 complete", lines[1])
         self.assertTrue(any("muxing:" in line and "10.0%" in line for line in lines))
+
+    def test_progress_reports_audio_as_parallel_side_work(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            plan = root / "plan.json"
+            log = root / "job.log"
+            plan.write_text(
+                json.dumps({"reencode_clips": [{"file": "00001.m2ts", "duration": 120.0}, {"file": "00002.m2ts", "duration": 120.0}]}),
+                encoding="utf-8",
+            )
+            log.write_text(
+                "\n".join(
+                    [
+                        "BD2HEVC_PROGRESS encode-start 00001.m2ts",
+                        "frame= 100 time=00:02:00.00 speed=4.0x",
+                        "BD2HEVC_PROGRESS encode-done 00001.m2ts",
+                        "BD2HEVC_PROGRESS audio-start 00001.m2ts",
+                        "size= 1000KiB time=00:00:30.00 bitrate=256.0kbits/s speed=40.0x",
+                        "BD2HEVC_PROGRESS encode-start 00002.m2ts",
+                        "frame= 100 time=00:00:24.00 speed=3.0x",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(target=str(root / "out"), plan=str(plan), log=str(log), width=32, watch=0)
+
+            lines = progress.progress_lines(args, inspect_outputs=False)
+
+        self.assertIn("60.0% encoded", lines[0])
+        self.assertIn("stage: audio + encoding", lines[0])
+        self.assertTrue(any(line.startswith("audio:") and "25.0%" in line for line in lines))
+        self.assertTrue(any(line.startswith("encoding:") and "20.0%" in line for line in lines))
 
 
 class BitratePresetTests(unittest.TestCase):
@@ -198,6 +246,14 @@ class BitratePresetTests(unittest.TestCase):
 
 
 class CopyPlanningTests(unittest.TestCase):
+    def test_disc_title_normalizer_preserves_acronyms_and_roman_numerals(self) -> None:
+        self.assertEqual(output.disc_title_from_folder_name("BACK_TO_THE_FUTURE_PART_II"), "Back to the Future Part II")
+        self.assertEqual(output.disc_title_from_folder_name("BBC_PRIDE_AND_PREJUDICE"), "BBC Pride and Prejudice")
+        self.assertEqual(output.disc_title_from_folder_name("my_dvd_backup"), "My DVD Backup")
+        self.assertEqual(output.disc_title_from_folder_name("IT"), "IT")
+        self.assertEqual(output.disc_title_from_folder_name("It"), "It")
+        self.assertEqual(output.disc_title_from_folder_name("PRIDE_PREJUDICE_2005_film"), "Pride Prejudice 2005 Film")
+
     def test_preservation_copy_skips_only_reencoded_streams(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -258,6 +314,79 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertNotIn("-bufsize:v:0", cmd)
         self.assertNotIn("-bluray-compat", cmd)
 
+    def test_compact_stereo_audio_reencodes_audio_without_subtitles_in_temp_media(self) -> None:
+        clip_info = {
+            "video": {
+                "fps": 23.976,
+                "target_hevc": {
+                    "mode": "compact-cq",
+                    "rate_control": "cq",
+                    "cq": 20,
+                    "maxrate_bps": 80_000_000,
+                    "bufsize_bps": 160_000_000,
+                },
+            },
+            "audio": [
+                {"codec_name": "truehd", "channels": 8, "language": "eng"},
+                {"codec_name": "ac3", "channels": 1, "language": "jpn"},
+            ],
+        }
+        cmd = bd.encode_to_hevc_m2ts(
+            Path("in.m2ts"),
+            Path("out.m2ts"),
+            clip_info,
+            {"ffmpeg": "ffmpeg"},
+            audio_mode="compact-stereo",
+            dry_run=True,
+        )
+        self.assertIn("-c:a", cmd)
+        self.assertIn("ac3", cmd)
+        self.assertIn("-ac:a:0", cmd)
+        self.assertIn("2", cmd)
+        self.assertIn("-ac:a:1", cmd)
+        self.assertIn("1", cmd)
+        self.assertIn("-b:a:0", cmd)
+        self.assertIn("256k", cmd)
+        self.assertIn("-b:a:1", cmd)
+        self.assertIn("128k", cmd)
+        self.assertNotIn("0:s?", cmd)
+        self.assertIn("-f", cmd)
+        self.assertIn("mpegts", cmd)
+
+    def test_compact_audio_tracks_are_elementary_ac3_files(self) -> None:
+        clip_info = {
+            "audio": [
+                {"index": 1, "codec_name": "truehd", "channels": 8, "language": "eng"},
+                {"index": 2, "codec_name": "ac3", "channels": 1, "language": "jpn"},
+            ],
+        }
+        outputs, cmd = bd.transcode_compact_audio_tracks(
+            Path("in.m2ts"),
+            Path("work/00001.compact-audio"),
+            clip_info,
+            {"ffmpeg": "ffmpeg"},
+            dry_run=True,
+        )
+        self.assertEqual([Path(item["path"]).suffix for item in outputs], [".ac3", ".ac3"])
+        self.assertEqual(outputs[0]["channels"], 2)
+        self.assertEqual(outputs[1]["channels"], 1)
+        self.assertIn("-map", cmd)
+        self.assertIn("0:a:0", cmd)
+        self.assertIn("0:a:1", cmd)
+        self.assertNotIn("0:s?", cmd)
+
+    def test_main_title_cq_override_targets_longest_reencoded_cq_clip(self) -> None:
+        clips = [
+            {"file": "00001.m2ts", "action": "reencode", "duration": 30.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
+            {"file": "00002.m2ts", "action": "reencode", "duration": 7200.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
+            {"file": "00003.m2ts", "action": "reencode", "duration": 8000.0, "video": {"target_hevc": {"rate_control": "vbr", "target_bps": 5_000_000}}},
+        ]
+        report = bd.apply_main_title_cq_override(clips, 18)
+        self.assertEqual(report["file"], "00002.m2ts")
+        self.assertEqual(clips[0]["video"]["target_hevc"]["cq"], 20)
+        self.assertEqual(clips[1]["video"]["target_hevc"]["cq"], 18)
+        self.assertNotIn("cq", clips[2]["video"]["target_hevc"])
+
     def test_background_command_carries_compact_cq_cutoff(self) -> None:
         args = argparse.Namespace(
             source="Disc",
@@ -283,6 +412,10 @@ class CommandConstructionTests(unittest.TestCase):
             bufsize_multiplier=2.0,
             compact_cq_value=20,
             anime_cq_min_duration=12 * 60.0,
+            main_title_cq=18,
+            audio_mode="compact-stereo",
+            stereo_audio_bitrate=256_000,
+            mono_audio_bitrate=128_000,
             vlc_compat=bd.DEFAULT_VLC_COMPATIBILITY_MODE,
             vlc_fix=[],
             compat_patch_file=[],
@@ -295,6 +428,60 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("20", cmd)
         self.assertIn("--compact-cq-min-duration", cmd)
         self.assertIn("720.0", cmd)
+        self.assertIn("--main-title-cq", cmd)
+        self.assertIn("18", cmd)
+        self.assertIn("--audio-mode", cmd)
+        self.assertIn("compact-stereo", cmd)
+
+    def test_job_loader_skips_transient_empty_job_files(self) -> None:
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "empty.job.json"
+            path.write_text("", encoding="utf-8")
+
+            self.assertIsNone(queueing.try_load_job(path, attempts=1))
+
+    def test_save_job_writes_readable_json(self) -> None:
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "job.job.json"
+            queueing.save_job(path, {"id": "job-1", "status": "queued"})
+
+            self.assertEqual(queueing.load_job(path)["id"], "job-1")
+
+    def test_save_job_retries_transient_windows_replace_denial(self) -> None:
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "job.job.json"
+            attempts = {"count": 0}
+            real_replace = queueing.os.replace
+
+            def flaky_replace(source: Path, target: Path) -> None:
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    raise PermissionError("locked")
+                real_replace(source, target)
+
+            with mock.patch.object(queueing.os, "replace", side_effect=flaky_replace), mock.patch.object(queueing.time, "sleep"):
+                queueing.save_job(path, {"id": "job-1", "status": "queued"})
+
+            self.assertGreaterEqual(attempts["count"], 2)
+            self.assertEqual(queueing.load_job(path)["id"], "job-1")
+
+    def test_status_handles_job_before_progress_plan_exists(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            job = {
+                "id": "job-1",
+                "status": "queued",
+                "source": str(root / "SOURCE_DISC"),
+                "output": str(root / "Output Disc (BD) (UHD converted)"),
+                "plan": str(root / "missing.plan.json"),
+                "log": str(root / "job.log"),
+                "exitcode": str(root / "job.exitcode.txt"),
+            }
+
+            lines = queueing.job_status_lines(job, width=32)
+
+        self.assertIn("planning scan has not finished yet", "\n".join(lines))
+        self.assertIn("encoded clips: unknown", "\n".join(lines))
 
     def test_legacy_anime_cq18_alias_still_maps_to_compact_cq(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
@@ -321,6 +508,32 @@ class CommandConstructionTests(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "compact-cq")
         self.assertEqual(plan["rate_control"], "cq")
+
+    def test_silent_menu_clip_gets_sparse_timing_detection(self) -> None:
+        probe = {
+            "streams": [
+                {
+                    "index": 0,
+                    "codec_type": "video",
+                    "codec_name": "mpeg2video",
+                    "width": 1920,
+                    "height": 1080,
+                    "avg_frame_rate": "24000/1001",
+                    "r_frame_rate": "24000/1001",
+                    "start_time": "11.650667",
+                    "duration": "65.106700",
+                }
+            ],
+            "format": {"duration": "65.106700", "bit_rate": "896120"},
+        }
+        with (
+            mock.patch.object(scan, "ffprobe_streams", return_value=probe),
+            mock.patch.object(scan, "count_video_frames", return_value=14),
+        ):
+            info = scan.inspect_clip(Path("00491.m2ts"), {"ffprobe": "ffprobe"})
+
+        self.assertTrue(info["video"]["sparse_timestamp_video"])
+        self.assertEqual(info["video"]["decoded_frame_count"], 14)
 
 
 class LinuxCompatibilityTests(unittest.TestCase):

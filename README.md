@@ -25,6 +25,23 @@ compatibility, queueing, validation, and repair code split into focused modules.
 Disc compatibility should still be treated as community-tested rather than
 guaranteed.
 
+## Table Of Contents
+
+- [Quick Start](#quick-start)
+- [Background Jobs](#background-jobs)
+- [Quality And Audio Recipes](#quality-and-audio-recipes)
+- [VLC Compatibility Fixes](#vlc-compatibility-fixes)
+- [Normal Validation](#normal-validation)
+- [Requirements](#requirements)
+- [Installing Tools](#installing-tools)
+- [VLC Java Setup For Menus](#vlc-java-setup-for-menus)
+- [What It Changes](#what-it-changes)
+- [Bitrate Controls](#bitrate-controls)
+- [Supported So Far](#supported-so-far)
+- [Repair And Diagnostics](#repair-and-diagnostics)
+- [JSON Output](#json-output)
+- [Legal](#legal)
+
 ## Quick Start
 
 Check that BD2HEVC can see the tools it needs:
@@ -83,9 +100,9 @@ python bd2hevc.py status
 
 `status` reports duration-weighted encoding progress, so a long movie clip
 counts by how far that clip has encoded rather than only as "one clip not
-done." Muxing appears as a separate live line because it is a required follow-up
-step, but it does not make the top progress bar fall backward after a large
-clip finishes encoding.
+done." Muxing and optional compact audio conversion appear as separate live
+lines because they are required follow-up work, but they do not make the top
+progress bar fall backward after a large clip finishes encoding.
 
 Watch the whole queue until all currently running or queued jobs finish:
 
@@ -103,15 +120,6 @@ In an interactive terminal, `--watch` redraws the same status block in place
 instead of appending a new progress bar every refresh. With no number it refreshes
 once per second. Add a number to choose another interval, for example
 `--watch 10`.
-
-Use compact CQ for episode-heavy discs or very large movie discs:
-
-```bash
-python bd2hevc.py queue "Anime Disc 1" "Anime Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
-```
-
-`compact-cq` keeps the meaning of CQ by using the requested CQ level on each
-clip that is long enough to be reencoded.
 
 List recent jobs:
 
@@ -159,6 +167,41 @@ python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
 
 Job files, logs, plans, and full reports are written under `reports/jobs/`.
 The final converted disc is written to the output folder shown by `start`.
+
+## Quality And Audio Recipes
+
+Use compact CQ for episode-heavy discs or very large movie discs:
+
+```bash
+python bd2hevc.py queue "Anime Disc 1" "Anime Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
+```
+
+`compact-cq` keeps the meaning of CQ by using the requested CQ level on each
+clip that is long enough to be reencoded.
+
+For storage-limited movie collections, you can spend more bits on the main
+feature while keeping extras compact:
+
+```bash
+python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18
+```
+
+`--main-title-cq` applies only to the longest reencoded CQ clip, which is the
+usual single-file main movie on many Blu-ray backups. Lower CQ means larger and
+higher quality.
+
+If the playback setup is stereo, `--audio-mode compact-stereo` can save a lot of
+space on discs with TrueHD/DTS-HD and many dub tracks:
+
+```bash
+python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
+```
+
+This converts each audio track in reencoded clips to Blu-ray-friendly AC-3,
+using stereo for multi-channel sources and mono for mono sources. Defaults are
+`256k` for stereo and `128k` for mono; adjust them with
+`--stereo-audio-bitrate` and `--mono-audio-bitrate`. Audio passthrough remains
+the default.
 
 ## VLC Compatibility Fixes
 
@@ -345,7 +388,9 @@ bd2hevc tools
 
 - Copies the full source backup structure.
 - Reencodes video clips longer than 10 seconds to HEVC.
-- Passes audio and PGS subtitle streams through unchanged.
+- Passes audio and PGS subtitle streams through unchanged by default.
+- Optionally converts audio in reencoded clips to compact AC-3 stereo/mono with
+  `--audio-mode compact-stereo`.
 - Keeps source resolution. No upscaling is done by `auto`.
 - Patches CLPI/MPLS video descriptors so replacement clips are described as
   HEVC.

@@ -53,6 +53,11 @@ BITRATE_MODES = ("smaller", "balanced", "transparent", "source-ratio", ANIME_CQ_
 HEVC_ENCODERS = ("hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265")
 HARDWARE_HEVC_ENCODERS = {"hevc_nvenc", "hevc_qsv", "hevc_amf"}
 
+AUDIO_MODES = ("passthrough", "compact-stereo")
+DEFAULT_AUDIO_MODE = "passthrough"
+DEFAULT_STEREO_AUDIO_BITRATE = 256_000
+DEFAULT_MONO_AUDIO_BITRATE = 128_000
+
 SPARSE_TIMING_FRAME_COUNT_MAX_DURATION = 900.0
 SPARSE_TIMING_ALWAYS_COUNT_MAX_DURATION = 60.0
 SPARSE_TIMING_MIN_GAP_SECONDS = 2.0

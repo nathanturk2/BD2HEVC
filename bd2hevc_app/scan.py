@@ -199,7 +199,7 @@ def ffprobe_streams(path: Path, tools: dict[str, Any]) -> dict[str, Any]:
         "-analyzeduration",
         "500M",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,width,height,pix_fmt,level,refs,has_b_frames,bit_rate,avg_frame_rate,r_frame_rate,start_time,duration:format=start_time,duration,bit_rate,size",
+        "stream=index,codec_type,codec_name,profile,width,height,pix_fmt,level,refs,has_b_frames,bit_rate,avg_frame_rate,r_frame_rate,start_time,duration,channels,channel_layout,sample_rate:stream_tags=language:format=start_time,duration,bit_rate,size",
         "-of",
         "json",
         str(path),
@@ -352,6 +352,7 @@ def inspect_clip(
             should_check_sparse = duration <= SPARSE_TIMING_ALWAYS_COUNT_MAX_DURATION
             sparse_source_fps_hint = parse_rate(video.get("r_frame_rate")) or fps
             should_check_sparse = should_check_sparse or sparse_source_fps_hint * SPARSE_TIMING_MIN_RATIO < fps
+            should_check_sparse = should_check_sparse or not audio
             frame_count = count_video_frames(path, tools) if should_check_sparse else None
             if frame_count and fps:
                 nominal_frame_duration = frame_count / fps
@@ -400,8 +401,14 @@ def compact_stream(stream: dict[str, Any] | None) -> dict[str, Any]:
         "r_frame_rate",
         "start_time",
         "duration",
+        "channels",
+        "channel_layout",
+        "sample_rate",
     ]
     compact = {k: stream[k] for k in keys if k in stream}
+    tags = stream.get("tags") or {}
+    if tags.get("language"):
+        compact["language"] = tags.get("language")
     if "bit_rate" in compact:
         compact["bit_rate_mbps"] = mbps(safe_int(compact.get("bit_rate")))
     if "start_time" in compact:

@@ -13,7 +13,18 @@ from pathlib import Path
 from typing import Any
 
 from .bitrate import safe_int
-from .config import ANIME_CQ_VALUE, DEFAULT_ANIME_CQ_MIN_DURATION, DEFAULT_JOB_DIR, DEFAULT_VLC_COMPATIBILITY_MODE, QUEUE_PAUSE_FILE, QUEUE_POLL_SECONDS, ROOT
+from .config import (
+    ANIME_CQ_VALUE,
+    DEFAULT_ANIME_CQ_MIN_DURATION,
+    DEFAULT_AUDIO_MODE,
+    DEFAULT_JOB_DIR,
+    DEFAULT_MONO_AUDIO_BITRATE,
+    DEFAULT_STEREO_AUDIO_BITRATE,
+    DEFAULT_VLC_COMPATIBILITY_MODE,
+    QUEUE_PAUSE_FILE,
+    QUEUE_POLL_SECONDS,
+    ROOT,
+)
 from .progress import WatchRenderer, progress_lines, read_text_flexible
 from .tools import ToolError, format_cmd, refreshed_env, selected_hevc_encoder
 
@@ -31,24 +42,62 @@ def job_paths(job_id: str) -> dict[str, Path]:
 
 
 def load_job(path: Path) -> dict[str, Any]:
-    return json.loads(read_text_flexible(path))
+    text = read_text_flexible(path)
+    if not text.strip():
+        raise json.JSONDecodeError("empty job file", text, 0)
+    return json.loads(text)
+
+
+def try_load_job(path: Path, *, attempts: int = 3, delay: float = 0.05) -> dict[str, Any] | None:
+    for attempt in range(max(1, attempts)):
+        try:
+            return load_job(path)
+        except (OSError, json.JSONDecodeError):
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+    return None
 
 
 def save_job(path: Path, job: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+        last_error: OSError | None = None
+        for attempt in range(20):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError as exc:
+                last_error = exc
+                if attempt + 1 >= 20:
+                    raise
+                time.sleep(0.05)
+        else:
+            if last_error:
+                raise last_error
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def known_job_files() -> list[Path]:
     if not DEFAULT_JOB_DIR.is_dir():
         return []
-    return sorted(DEFAULT_JOB_DIR.glob("*.job.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(DEFAULT_JOB_DIR.glob("*.job.json"), key=mtime, reverse=True)
 
 
 def active_queue_jobs() -> list[tuple[Path, dict[str, Any], str]]:
     active: list[tuple[Path, dict[str, Any], str]] = []
     for path in known_job_files():
-        job = load_job(path)
+        job = try_load_job(path)
+        if job is None:
+            continue
         job["job_file"] = str(path)
         status = job_runtime_status(job)
         if status in {"running", "queued", "paused"}:
@@ -57,7 +106,7 @@ def active_queue_jobs() -> list[tuple[Path, dict[str, Any], str]]:
 
 
 def find_job(identifier: str | None) -> tuple[Path, dict[str, Any]]:
-    jobs = [(path, load_job(path)) for path in known_job_files()]
+    jobs = [(path, job) for path in known_job_files() if (job := try_load_job(path)) is not None]
     if not jobs:
         raise ToolError("No BD2HEVC background jobs found. Start one with: python bd2hevc.py start <source>")
     if not identifier:
@@ -212,7 +261,7 @@ def append_option(argv: list[str], flag: str, value: Any, default: Any = None) -
         argv.extend([flag, str(value)])
 
 
-def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Path) -> list[str]:
+def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Path, plan_path: Path | None = None) -> list[str]:
     script = ROOT / "bd2hevc.py"
     argv = [sys.executable, str(script), "auto", str(Path(args.source).resolve()), str(output)]
     for flag in (
@@ -242,6 +291,10 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--bufsize-multiplier", getattr(args, "bufsize_multiplier", 2.0), 2.0)
     append_option(argv, "--compact-cq-value", getattr(args, "compact_cq_value", ANIME_CQ_VALUE), ANIME_CQ_VALUE)
     append_option(argv, "--compact-cq-min-duration", getattr(args, "anime_cq_min_duration", DEFAULT_ANIME_CQ_MIN_DURATION), DEFAULT_ANIME_CQ_MIN_DURATION)
+    append_option(argv, "--main-title-cq", getattr(args, "main_title_cq", None))
+    append_option(argv, "--audio-mode", getattr(args, "audio_mode", DEFAULT_AUDIO_MODE), DEFAULT_AUDIO_MODE)
+    append_option(argv, "--stereo-audio-bitrate", getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE), DEFAULT_STEREO_AUDIO_BITRATE)
+    append_option(argv, "--mono-audio-bitrate", getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE), DEFAULT_MONO_AUDIO_BITRATE)
     append_option(argv, "--vlc-compat", getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE), DEFAULT_VLC_COMPATIBILITY_MODE)
     for fix in getattr(args, "vlc_fix", None) or []:
         argv.extend(["--vlc-fix", str(fix)])
@@ -251,6 +304,8 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
         argv.extend(["--decode-sample", "0"])
     else:
         append_option(argv, "--decode-sample", getattr(args, "decode_sample", 30.0), 30.0)
+    if plan_path is not None:
+        argv.extend(["--progress-plan", str(plan_path)])
     argv.extend(["--no-progress", "--report", str(report_path)])
     return argv
 
@@ -277,9 +332,8 @@ def older_active_jobs(current_path: Path, current_job: dict[str, Any]) -> list[d
     for path in known_job_files():
         if path.resolve() == current_path.resolve():
             continue
-        try:
-            job = load_job(path)
-        except Exception:
+        job = try_load_job(path)
+        if job is None:
             continue
         if float(job.get("queue_order") or 0) >= current_order:
             continue
@@ -333,7 +387,9 @@ def wait_for_queue_turn(job_path: Path, job: dict[str, Any], log: Any) -> dict[s
 
 def cmd_run_job(args: argparse.Namespace) -> int:
     job_path = Path(args.job).resolve()
-    job = load_job(job_path)
+    job = try_load_job(job_path)
+    if job is None:
+        raise ToolError(f"Could not read job file: {job_path}")
     log_path = Path(job["log"])
     exit_path = Path(job["exitcode"])
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,20 +432,26 @@ def cmd_run_job(args: argparse.Namespace) -> int:
 
 
 def job_status_lines(job: dict[str, Any], *, width: int) -> list[str]:
-    args = argparse.Namespace(
-        target=job["output"],
-        plan=job["plan"],
-        log=job.get("log"),
-        width=width,
-        watch=0,
-    )
     output_name = Path(str(job.get("output") or "")).name
     job_id = str(job.get("id") or "")
     title = output_name or Path(str(job.get("source") or "")).name or job_id
     lines = [f"Disc: {title}"]
     if job_id:
         lines.append(f"Job: {job_id}")
-    lines.extend(progress_lines(args, inspect_outputs=False))
+    plan_path = Path(str(job.get("plan") or ""))
+    if plan_path.is_file() and plan_path.stat().st_size > 0:
+        args = argparse.Namespace(
+            target=job["output"],
+            plan=job["plan"],
+            log=job.get("log"),
+            width=width,
+            watch=0,
+        )
+        lines.extend(progress_lines(args, inspect_outputs=False))
+    else:
+        bar_width = min(width, 32)
+        lines.append(f"[{'-' * bar_width}]   planning scan has not finished yet")
+        lines.append("encoded clips: unknown until planning completes")
     exit_path = Path(job["exitcode"])
     exit_code = safe_int(read_text_flexible(exit_path).strip()) if exit_path.exists() else None
     status = job_runtime_status(job)
@@ -442,7 +504,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_jobs(args: argparse.Namespace) -> int:
-    jobs = [(path, load_job(path)) for path in known_job_files()]
+    jobs = [(path, job) for path in known_job_files() if (job := try_load_job(path)) is not None]
     if not jobs:
         print("No BD2HEVC background jobs found.")
         return 0
