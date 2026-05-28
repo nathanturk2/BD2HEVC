@@ -508,8 +508,8 @@ class CommandConstructionTests(unittest.TestCase):
                 job = queueing.load_job(root / "job-3.job.json")
                 lines = "\n".join(queueing.job_status_lines(job, width=80))
 
-        self.assertIn("Queue: 2 earlier active jobs ahead", lines)
-        self.assertIn("Current blocker: job-1", lines)
+        self.assertIn("Queue: 2 jobs ahead", lines)
+        self.assertIn("Next ahead: job-1", lines)
         self.assertIn("Also ahead: job-2", lines)
 
     def test_legacy_anime_cq18_alias_still_maps_to_compact_cq(self) -> None:

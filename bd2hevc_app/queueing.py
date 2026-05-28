@@ -362,8 +362,8 @@ def queue_waiting_lines(job: dict[str, Any]) -> list[str]:
     if blockers:
         count = len(blockers)
         noun = "job" if count == 1 else "jobs"
-        lines = [f"Queue: {count} earlier active {noun} ahead"]
-        lines.append(f"Current blocker: {job_display_id(blockers[0])}")
+        lines = [f"Queue: {count} {noun} ahead"]
+        lines.append(f"Next ahead: {job_display_id(blockers[0])}")
         if count > 1:
             also_ahead = ", ".join(job_display_id(blocker) for blocker in blockers[1:4])
             if count > 4:
@@ -372,7 +372,7 @@ def queue_waiting_lines(job: dict[str, Any]) -> list[str]:
         return lines
     waiting_for = job.get("waiting_for")
     if waiting_for:
-        return [f"Current blocker: {waiting_for}"]
+        return [f"Next ahead: {waiting_for}"]
     return []
 
 

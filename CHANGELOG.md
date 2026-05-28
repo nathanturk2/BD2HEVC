@@ -69,8 +69,8 @@
   background job instead of creating a foreground placeholder plan.
 - Hardened queue job-file writes and reads against transient empty JSON files
   and Windows file-replacement races while status is watching a running queue.
-- Clarified queued job status so later jobs show how many earlier active jobs
-  are ahead instead of appearing to wait only behind the current running job.
+- Clarified queued job status so later jobs show how many jobs are ahead
+  instead of appearing to wait only behind the current running job.
 - Improved generated output names with acronym and Roman numeral preservation,
   backed by CC0 acronym data plus media-specific terms.
 - Improved sparse silent menu/gallery clip detection so still-like video-only
