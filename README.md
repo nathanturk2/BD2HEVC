@@ -77,9 +77,12 @@ BD2HEVC targets HEVC/H.265 regardless of encoder. The tested default is
 `--encoder hevc_nvenc`, and you can also select `hevc_qsv`, `hevc_amf`, or
 `libx265` when your FFmpeg build supports them. Full-disc conversion uses a
 small encode-to-mux queue for hardware HEVC encoders: one clip encodes while the
-single muxer finishes earlier clips. CPU `libx265` stays serial. Use
+single muxer finishes earlier clips. When `--audio-mode compact-stereo` is also
+enabled, compact audio gets its own middle stage so audio for the next clip can
+transcode while the previous clip is muxing. CPU `libx265` stays serial. Use
 `--no-encode-ahead` to disable that pipeline even with hardware encoding, or
-`--encode-ahead-depth 1` to allow only one completed encode to wait for muxing.
+`--encode-ahead-depth 1` to allow only one completed encode to wait for later
+stages.
 
 ## Background Jobs
 

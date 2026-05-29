@@ -394,26 +394,29 @@ def encode_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: 
     return ctx
 
 
-def finalize_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+def transcode_compact_audio_context(ctx: dict[str, Any], tools: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    progress_event("audio-start", ctx["file"])
+    try:
+        audio_tracks, _audio_cmd = transcode_compact_audio_tracks(
+            ctx["input_path"],
+            ctx["temp_audio_prefix"],
+            ctx["clip"],
+            tools,
+            stereo_audio_bitrate=stereo_audio_bitrate_from_args(args),
+            mono_audio_bitrate=mono_audio_bitrate_from_args(args),
+            dry_run=False,
+            verbose=args.verbose,
+        )
+        ctx["compact_audio_tracks"] = audio_tracks
+    except Exception:
+        progress_event("audio-failed", ctx["file"])
+        raise
+    progress_event("audio-done", ctx["file"])
+    return ctx
+
+
+def mux_validate_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     compact_audio = audio_mode_from_args(args) == "compact-stereo"
-    if compact_audio:
-        progress_event("audio-start", ctx["file"])
-        try:
-            audio_tracks, _audio_cmd = transcode_compact_audio_tracks(
-                ctx["input_path"],
-                ctx["temp_audio_prefix"],
-                ctx["clip"],
-                tools,
-                stereo_audio_bitrate=stereo_audio_bitrate_from_args(args),
-                mono_audio_bitrate=mono_audio_bitrate_from_args(args),
-                dry_run=False,
-                verbose=args.verbose,
-            )
-            ctx["compact_audio_tracks"] = audio_tracks
-        except Exception:
-            progress_event("audio-failed", ctx["file"])
-            raise
-        progress_event("audio-done", ctx["file"])
     progress_event("mux-start", ctx["file"])
     try:
         author_m2ts_split(
@@ -447,6 +450,12 @@ def finalize_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args
     )
     progress_event("validate-done", ctx["file"])
     return validation
+
+
+def finalize_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    if audio_mode_from_args(args) == "compact-stereo":
+        transcode_compact_audio_context(ctx, tools, args)
+    return mux_validate_clone_clip_context(ctx, tools, args)
 
 
 def run_queued_encode_mux_pipeline(
@@ -531,6 +540,116 @@ def run_queued_encode_mux_pipeline(
     return validations, done_seconds
 
 
+def run_queued_encode_audio_mux_pipeline(
+    contexts: list[dict[str, Any]],
+    tools: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    total_seconds: float,
+    progress_enabled: bool,
+) -> tuple[list[dict[str, Any]], float]:
+    validations: list[dict[str, Any]] = []
+    done_seconds = 0.0
+    max_depth = max(1, int(getattr(args, "encode_ahead_depth", 3) or 1))
+    encoded_queue: thread_queue.Queue[tuple[str, dict[str, Any] | BaseException | None]] = thread_queue.Queue(maxsize=max_depth)
+    audio_ready_queue: thread_queue.Queue[tuple[str, dict[str, Any] | BaseException | None]] = thread_queue.Queue(maxsize=max_depth)
+    stop_event = threading.Event()
+
+    def queue_put(q: thread_queue.Queue[tuple[str, dict[str, Any] | BaseException | None]], item: tuple[str, dict[str, Any] | BaseException | None]) -> bool:
+        while not stop_event.is_set():
+            try:
+                q.put(item, timeout=0.5)
+                return True
+            except thread_queue.Full:
+                continue
+        return False
+
+    def producer() -> None:
+        try:
+            for ctx in contexts:
+                if stop_event.is_set():
+                    break
+                encode_clone_clip_context(ctx, tools, args)
+                if not queue_put(encoded_queue, ("encoded", ctx)):
+                    break
+        except BaseException as exc:
+            queue_put(encoded_queue, ("error", exc))
+        finally:
+            queue_put(encoded_queue, ("done", None))
+
+    def audio_worker() -> None:
+        try:
+            while True:
+                kind, payload = encoded_queue.get()
+                if kind == "done":
+                    queue_put(audio_ready_queue, ("done", None))
+                    return
+                if kind == "error":
+                    queue_put(audio_ready_queue, ("error", payload))
+                    return
+                ctx = payload
+                assert isinstance(ctx, dict)
+                transcode_compact_audio_context(ctx, tools, args)
+                if not queue_put(audio_ready_queue, ("audio", ctx)):
+                    return
+        except BaseException as exc:
+            queue_put(audio_ready_queue, ("error", exc))
+
+    progress_event("pipeline", "enabled", mode="encode-audio-mux-queue", depth=max_depth)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        producer_future = executor.submit(producer)
+        audio_future = executor.submit(audio_worker)
+        try:
+            while True:
+                kind, payload = audio_ready_queue.get()
+                if kind == "done":
+                    audio_future.result()
+                    producer_future.result()
+                    break
+                if kind == "error":
+                    stop_event.set()
+                    audio_future.result()
+                    producer_future.result()
+                    raise payload  # type: ignore[misc]
+                ctx = payload
+                assert isinstance(ctx, dict)
+                emit_conversion_progress(
+                    done_seconds,
+                    total_seconds,
+                    len(validations),
+                    len(contexts),
+                    current=ctx["file"],
+                    stage="muxing audio queue",
+                    enabled=progress_enabled,
+                )
+                validation = mux_validate_clone_clip_context(ctx, tools, args)
+                validations.append(validation)
+                done_seconds += float(ctx["clip"].get("duration") or 0)
+                emit_conversion_progress(
+                    done_seconds,
+                    total_seconds,
+                    len(validations),
+                    len(contexts),
+                    current=ctx["file"],
+                    stage="validated",
+                    enabled=progress_enabled,
+                )
+        except BaseException:
+            stop_event.set()
+            for q in (encoded_queue, audio_ready_queue):
+                while True:
+                    try:
+                        q.get_nowait()
+                    except thread_queue.Empty:
+                        break
+                try:
+                    q.put_nowait(("done", None))
+                except thread_queue.Full:
+                    pass
+            raise
+    return validations, done_seconds
+
+
 def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> dict[str, Any]:
     if args.uhd_scale or args.skip_audio or args.skip_subtitles:
         raise ToolError("--uhd-scale, --skip-audio, and --skip-subtitles are only supported by movie-only mode")
@@ -572,14 +691,24 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     contexts = [clone_clip_context(source, output, clip) for clip in clips]
     encoder = selected_hevc_encoder(args)
     encode_ahead = len(contexts) > 1 and encoder_is_hardware(encoder) and not getattr(args, "no_encode_ahead", False)
+    compact_audio_pipeline = encode_ahead and audio_mode_from_args(args) == "compact-stereo"
     if encode_ahead:
-        validations, done_seconds = run_queued_encode_mux_pipeline(
-            contexts,
-            tools,
-            args,
-            total_seconds=total_seconds,
-            progress_enabled=progress_enabled,
-        )
+        if compact_audio_pipeline:
+            validations, done_seconds = run_queued_encode_audio_mux_pipeline(
+                contexts,
+                tools,
+                args,
+                total_seconds=total_seconds,
+                progress_enabled=progress_enabled,
+            )
+        else:
+            validations, done_seconds = run_queued_encode_mux_pipeline(
+                contexts,
+                tools,
+                args,
+                total_seconds=total_seconds,
+                progress_enabled=progress_enabled,
+            )
     else:
         for index, ctx in enumerate(contexts, start=1):
             emit_conversion_progress(
@@ -657,6 +786,8 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         "validation": validations,
         "makemkv_validation": makemkv_validation,
     }
+    if encode_ahead:
+        result["pipeline"] = "encode-audio-mux-queue" if compact_audio_pipeline else "encode-mux-queue"
     if navigation_patch is not None:
         result["navigation_patch"] = navigation_patch
     if bdj_compatibility_patch is not None:
@@ -1331,10 +1462,10 @@ def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: bool = False) -> None:
-    parser.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="HEVC encoder to use. Hardware encoders can overlap next-clip encoding with current-clip muxing; libx265 stays serial.")
+    parser.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="HEVC encoder to use. Hardware encoders can overlap next-clip encoding with later audio/muxing stages; libx265 stays serial.")
     if include_encode_ahead:
         parser.add_argument("--no-encode-ahead", action="store_true", help="Disable hardware encode-ahead pipelining and run encode/mux serially.")
-        parser.add_argument("--encode-ahead-depth", type=int, default=3, help="Maximum completed HEVC temp clips allowed to wait for the single muxer. Hardware encoders only; default 3.")
+        parser.add_argument("--encode-ahead-depth", type=int, default=3, help="Maximum completed HEVC temp clips allowed to wait for later audio/muxing stages. Hardware encoders only; default 3.")
 
 
 def add_audio_args(parser: argparse.ArgumentParser) -> None:

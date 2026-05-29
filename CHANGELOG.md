@@ -73,6 +73,8 @@
   instead of appearing to wait only behind the current running job.
 - Added command-specific CLI help examples, with top-level `--help` pointing
   users to `py bd2hevc.py <command> --help`.
+- Added a hardware encode-ahead compact-audio pipeline so compact stereo audio
+  for the next clip can be transcoded while the previous clip is muxing.
 - Improved generated output names with acronym and Roman numeral preservation,
   backed by CC0 acronym data plus media-specific terms.
 - Improved sparse silent menu/gallery clip detection so still-like video-only

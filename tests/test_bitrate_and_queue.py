@@ -453,6 +453,48 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("--audio-mode", cmd)
         self.assertIn("compact-stereo", cmd)
 
+    def test_compact_audio_pipeline_runs_audio_before_mux_per_clip(self) -> None:
+        args = argparse.Namespace(encode_ahead_depth=2, audio_mode="compact-stereo")
+        contexts = [
+            {"file": "00001.m2ts", "clip": {"duration": 1.0}},
+            {"file": "00002.m2ts", "clip": {"duration": 2.0}},
+        ]
+        events: list[tuple[str, str]] = []
+
+        def fake_encode(ctx: dict, tools: dict, args: argparse.Namespace) -> dict:
+            events.append(("encode", ctx["file"]))
+            return ctx
+
+        def fake_audio(ctx: dict, tools: dict, args: argparse.Namespace) -> dict:
+            events.append(("audio", ctx["file"]))
+            return ctx
+
+        def fake_mux(ctx: dict, tools: dict, args: argparse.Namespace) -> dict:
+            events.append(("mux", ctx["file"]))
+            return {"file": ctx["file"]}
+
+        with (
+            mock.patch.object(bd, "encode_clone_clip_context", side_effect=fake_encode),
+            mock.patch.object(bd, "transcode_compact_audio_context", side_effect=fake_audio),
+            mock.patch.object(bd, "mux_validate_clone_clip_context", side_effect=fake_mux),
+            mock.patch.object(bd, "emit_conversion_progress"),
+            mock.patch.object(bd, "progress_event") as progress_event,
+        ):
+            validations, done_seconds = bd.run_queued_encode_audio_mux_pipeline(
+                contexts,
+                {},
+                args,
+                total_seconds=3.0,
+                progress_enabled=False,
+            )
+
+        self.assertEqual([item["file"] for item in validations], ["00001.m2ts", "00002.m2ts"])
+        self.assertEqual(done_seconds, 3.0)
+        for clip_file in ("00001.m2ts", "00002.m2ts"):
+            clip_events = [index for index, event in enumerate(events) if event[1] == clip_file]
+            self.assertEqual([events[index][0] for index in clip_events], ["encode", "audio", "mux"])
+        progress_event.assert_any_call("pipeline", "enabled", mode="encode-audio-mux-queue", depth=2)
+
     def test_job_loader_skips_transient_empty_job_files(self) -> None:
         with TemporaryDirectory() as temp:
             path = Path(temp) / "empty.job.json"
