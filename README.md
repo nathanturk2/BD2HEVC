@@ -193,6 +193,16 @@ python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-m
 usual single-file main movie on many Blu-ray backups. Lower CQ means larger and
 higher quality.
 
+For episode discs, use `--top-n-cq COUNT CQ` instead. This applies the chosen CQ
+to the longest reencoded CQ clips, which lets a disc with three episodes keep
+those episodes at higher quality while extras stay at the general compact CQ:
+
+```bash
+python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --top-n-cq 3 18
+```
+
+`--top-n-cq` and `--main-title-cq` are mutually exclusive.
+
 If the playback setup is stereo, `--audio-mode compact-stereo` can save a lot of
 space on discs with TrueHD/DTS-HD and many dub tracks:
 

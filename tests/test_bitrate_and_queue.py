@@ -407,6 +407,30 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(clips[1]["video"]["target_hevc"]["cq"], 18)
         self.assertNotIn("cq", clips[2]["video"]["target_hevc"])
 
+    def test_top_n_cq_override_targets_longest_reencoded_cq_clips(self) -> None:
+        clips = [
+            {"file": "00001.m2ts", "action": "reencode", "duration": 30.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
+            {"file": "00002.m2ts", "action": "reencode", "duration": 7200.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
+            {"file": "00003.m2ts", "action": "reencode", "duration": 3600.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
+            {"file": "00004.m2ts", "action": "reencode", "duration": 8000.0, "video": {"target_hevc": {"rate_control": "vbr", "target_bps": 5_000_000}}},
+            {"file": "00005.m2ts", "action": "copy", "duration": 9000.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
+        ]
+
+        report = bd.apply_top_n_cq_override(clips, [2, 18])
+
+        self.assertEqual(report["matched_count"], 2)
+        self.assertEqual([item["file"] for item in report["clips"]], ["00002.m2ts", "00003.m2ts"])
+        self.assertEqual(clips[0]["video"]["target_hevc"]["cq"], 20)
+        self.assertEqual(clips[1]["video"]["target_hevc"]["cq"], 18)
+        self.assertEqual(clips[2]["video"]["target_hevc"]["cq"], 18)
+        self.assertNotIn("cq", clips[3]["video"]["target_hevc"])
+
+    def test_top_n_cq_rejects_main_title_cq_combination(self) -> None:
+        args = argparse.Namespace(main_title_cq=18, top_n_cq=[3, 18])
+
+        with self.assertRaisesRegex(bd.ToolError, "cannot be used"):
+            bd.validate_cq_override_args(args)
+
     def test_background_command_carries_compact_cq_cutoff(self) -> None:
         args = argparse.Namespace(
             source="Disc",
@@ -433,6 +457,7 @@ class CommandConstructionTests(unittest.TestCase):
             compact_cq_value=20,
             anime_cq_min_duration=12 * 60.0,
             main_title_cq=18,
+            top_n_cq=None,
             audio_mode="compact-stereo",
             stereo_audio_bitrate=256_000,
             mono_audio_bitrate=128_000,
@@ -452,6 +477,46 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("18", cmd)
         self.assertIn("--audio-mode", cmd)
         self.assertIn("compact-stereo", cmd)
+
+    def test_background_command_carries_top_n_cq(self) -> None:
+        args = argparse.Namespace(
+            source="Disc",
+            fast_bitrate=False,
+            force_encode=False,
+            force=False,
+            makemkv=False,
+            no_makemkv=False,
+            require_makemkv=False,
+            no_patch_navigation=False,
+            no_bdj_compatibility_patches=False,
+            no_encode_ahead=False,
+            verbose=False,
+            hevc_bit_depth=8,
+            encoder="hevc_nvenc",
+            encode_ahead_depth=3,
+            bitrate_preset_file=None,
+            bitrate_mode="compact-cq",
+            hevc_bitrate_factor=None,
+            min_video_bitrate=2_000_000,
+            max_video_bitrate=80_000_000,
+            maxrate_multiplier=1.55,
+            bufsize_multiplier=2.0,
+            compact_cq_value=20,
+            anime_cq_min_duration=config.DEFAULT_ANIME_CQ_MIN_DURATION,
+            main_title_cq=None,
+            top_n_cq=[3, 18],
+            audio_mode="compact-stereo",
+            stereo_audio_bitrate=256_000,
+            mono_audio_bitrate=128_000,
+            vlc_compat=bd.DEFAULT_VLC_COMPATIBILITY_MODE,
+            vlc_fix=[],
+            compat_patch_file=[],
+            decode_sample=30.0,
+        )
+        cmd = bd.auto_command_for_job(args, Path("out"), Path("report.json"))
+        self.assertIn("--top-n-cq", cmd)
+        index = cmd.index("--top-n-cq")
+        self.assertEqual(cmd[index + 1 : index + 3], ["3", "18"])
 
     def test_compact_audio_pipeline_runs_audio_before_mux_per_clip(self) -> None:
         args = argparse.Namespace(encode_ahead_depth=2, audio_mode="compact-stereo")

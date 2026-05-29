@@ -292,6 +292,9 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--compact-cq-value", getattr(args, "compact_cq_value", ANIME_CQ_VALUE), ANIME_CQ_VALUE)
     append_option(argv, "--compact-cq-min-duration", getattr(args, "anime_cq_min_duration", DEFAULT_ANIME_CQ_MIN_DURATION), DEFAULT_ANIME_CQ_MIN_DURATION)
     append_option(argv, "--main-title-cq", getattr(args, "main_title_cq", None))
+    top_n_cq = getattr(args, "top_n_cq", None)
+    if top_n_cq:
+        argv.extend(["--top-n-cq", str(top_n_cq[0]), str(top_n_cq[1])])
     append_option(argv, "--audio-mode", getattr(args, "audio_mode", DEFAULT_AUDIO_MODE), DEFAULT_AUDIO_MODE)
     append_option(argv, "--stereo-audio-bitrate", getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE), DEFAULT_STEREO_AUDIO_BITRATE)
     append_option(argv, "--mono-audio-bitrate", getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE), DEFAULT_MONO_AUDIO_BITRATE)

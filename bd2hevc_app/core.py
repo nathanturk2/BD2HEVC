@@ -156,17 +156,35 @@ def mono_audio_bitrate_from_args(args: argparse.Namespace) -> int:
     return int(getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE) or DEFAULT_MONO_AUDIO_BITRATE)
 
 
-def apply_main_title_cq_override(clips: list[dict[str, Any]], cq_value: int | None) -> dict[str, Any] | None:
-    if cq_value is None:
-        return None
-    if cq_value < 0 or cq_value > 51:
-        raise ToolError("--main-title-cq must be between 0 and 51")
+def cq_override_candidates(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
     candidates = [
         clip
         for clip in clips
         if clip.get("action") == "reencode"
         and (((clip.get("video") or {}).get("target_hevc") or {}).get("rate_control") == "cq")
     ]
+    return sorted(candidates, key=lambda item: float(item.get("duration") or 0), reverse=True)
+
+
+def validate_cq_override_args(args: argparse.Namespace) -> None:
+    if getattr(args, "main_title_cq", None) is not None and getattr(args, "top_n_cq", None):
+        raise ToolError("--top-n-cq cannot be used with --main-title-cq")
+    top_n_cq = getattr(args, "top_n_cq", None)
+    if top_n_cq is None:
+        return
+    count, cq_value = [int(value) for value in top_n_cq]
+    if count < 1:
+        raise ToolError("--top-n-cq COUNT must be at least 1")
+    if cq_value < 0 or cq_value > 51:
+        raise ToolError("--top-n-cq CQ must be between 0 and 51")
+
+
+def apply_main_title_cq_override(clips: list[dict[str, Any]], cq_value: int | None) -> dict[str, Any] | None:
+    if cq_value is None:
+        return None
+    if cq_value < 0 or cq_value > 51:
+        raise ToolError("--main-title-cq must be between 0 and 51")
+    candidates = cq_override_candidates(clips)
     main_clip = max(candidates, key=lambda item: float(item.get("duration") or 0), default=None)
     if not main_clip:
         return None
@@ -183,6 +201,43 @@ def apply_main_title_cq_override(clips: list[dict[str, Any]], cq_value: int | No
         "previous_cq": previous,
         "cq": cq_value,
     }
+
+
+def apply_top_n_cq_override(clips: list[dict[str, Any]], top_n_cq: list[int] | tuple[int, int] | None) -> dict[str, Any] | None:
+    if not top_n_cq:
+        return None
+    count, cq_value = [int(value) for value in top_n_cq]
+    if count < 1:
+        raise ToolError("--top-n-cq COUNT must be at least 1")
+    if cq_value < 0 or cq_value > 51:
+        raise ToolError("--top-n-cq CQ must be between 0 and 51")
+    selected = cq_override_candidates(clips)[:count]
+    if not selected:
+        return None
+    report_clips: list[dict[str, Any]] = []
+    for clip in selected:
+        target = ((clip.get("video") or {}).get("target_hevc") or {})
+        previous = safe_int(target.get("cq"))
+        target["cq"] = cq_value
+        target["compact_cq_value"] = cq_value
+        target["top_n_cq_override"] = True
+        reason = target.get("reason")
+        target["reason"] = f"{reason}; top {count} CQ override {previous} -> {cq_value}" if reason else f"top {count} CQ override {previous} -> {cq_value}"
+        report_clips.append(
+            {
+                "file": clip.get("file"),
+                "duration": clip.get("duration"),
+                "previous_cq": previous,
+                "cq": cq_value,
+            }
+        )
+    return {
+        "count": count,
+        "cq": cq_value,
+        "clips": report_clips,
+        "matched_count": len(report_clips),
+    }
+
 
 def extract_title_with_makemkv(source: Path, title_id: int, destination: Path, tools: dict[str, Any], *, dry_run: bool, verbose: bool) -> Path:
     exe = tools.get("makemkvcon64") or tools.get("makemkvcon")
@@ -343,6 +398,7 @@ def clone_streams_plan_payload(
     args: argparse.Namespace,
     bitrate_options: dict[str, Any],
     main_title_cq_override: dict[str, Any] | None,
+    top_n_cq_override: dict[str, Any] | None,
     clips: list[dict[str, Any]],
     *,
     planning_pending: bool = False,
@@ -356,6 +412,7 @@ def clone_streams_plan_payload(
         "encoder": selected_hevc_encoder(args),
         "bitrate": bitrate_options,
         "main_title_cq_override": main_title_cq_override,
+        "top_n_cq_override": top_n_cq_override,
         "audio": {
             "mode": audio_mode_from_args(args),
             "stereo_bitrate": stereo_audio_bitrate_from_args(args),
@@ -653,6 +710,7 @@ def run_queued_encode_audio_mux_pipeline(
 def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> dict[str, Any]:
     if args.uhd_scale or args.skip_audio or args.skip_subtitles:
         raise ToolError("--uhd-scale, --skip-audio, and --skip-subtitles are only supported by movie-only mode")
+    validate_cq_override_args(args)
     source = Path(args.source).resolve()
     output = Path(args.output).resolve() if args.output else default_output_for(source, "clone-streams")
     bitrate_options = bitrate_options_from_args(args)
@@ -667,6 +725,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         verbose=args.verbose,
     )
     main_title_cq_override = apply_main_title_cq_override(scan.get("clips", []), getattr(args, "main_title_cq", None))
+    top_n_cq_override = apply_top_n_cq_override(scan.get("clips", []), getattr(args, "top_n_cq", None))
     clips = [c for c in scan.get("clips", []) if c.get("action") == "reencode"]
     progress_plan_path = path_or_none(getattr(args, "progress_plan", None))
     plan_payload = clone_streams_plan_payload(
@@ -675,6 +734,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         args,
         bitrate_options,
         main_title_cq_override,
+        top_n_cq_override,
         clips,
     )
     if progress_plan_path:
@@ -770,6 +830,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         "encoder": encoder,
         "bitrate": bitrate_options,
         "main_title_cq_override": main_title_cq_override,
+        "top_n_cq_override": top_n_cq_override,
         "audio": {
             "mode": audio_mode_from_args(args),
             "stereo_bitrate": stereo_audio_bitrate_from_args(args),
@@ -1363,6 +1424,7 @@ def cmd_vlc_smoke(args: argparse.Namespace) -> int:
 
 
 def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -> dict[str, Any]:
+    validate_cq_override_args(args)
     tools = discover_tools()
     for key in ("ffmpeg", "ffprobe", "tsmuxer"):
         require_tool(tools, key)
@@ -1459,6 +1521,7 @@ def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for reencoded clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
     parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Defaults to the 10-second reencode threshold. Raise it if only episode/movie-length clips should use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
     parser.add_argument("--main-title-cq", type=int, default=None, help="Override compact-cq for the longest reencoded clip. Lower is larger/higher quality; useful for CQ20 extras with a CQ18 main movie.")
+    parser.add_argument("--top-n-cq", nargs=2, type=int, metavar=("COUNT", "CQ"), default=None, help="Override compact-cq for the COUNT longest reencoded CQ clips. Mutually exclusive with --main-title-cq; useful for episode discs, e.g. --top-n-cq 3 18.")
 
 
 def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: bool = False) -> None:
@@ -1599,6 +1662,7 @@ def build_parser() -> argparse.ArgumentParser:
   py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
   py bd2hevc.py queue "Disc 1" "Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
   py bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
+  py bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --top-n-cq 3 18
 """)
     p_queue.add_argument("sources", nargs="+", help="Source BD backup folders or parent folders containing BDMV backups.")
     p_queue.add_argument("--output-dir", default=None, help="Put each converted output in this folder using '<Title> (BD) (UHD converted)' names.")
