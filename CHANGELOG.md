@@ -78,6 +78,8 @@
 - Added `--top-n-cq COUNT CQ` for episode discs, letting the longest reencoded
   CQ clips use a different CQ from extras; mutually exclusive with
   `--main-title-cq`.
+- Compact stereo audio now skips unplayable zero-channel streams that FFprobe
+  can misidentify as audio, and maps source audio by stream index.
 - Improved generated output names with acronym and Roman numeral preservation,
   backed by CC0 acronym data plus media-specific terms.
 - Improved sparse silent menu/gallery clip detection so still-like video-only

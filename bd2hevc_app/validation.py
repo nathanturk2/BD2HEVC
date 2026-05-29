@@ -8,6 +8,7 @@ from typing import Any
 
 from .bitrate import safe_float, safe_int
 from .config import SECONDS_REENCODE_THRESHOLD
+from .encoding import compact_audio_source_streams
 from .scan import inspect_clip, run_makemkv_scan, title_summary
 from .tools import format_cmd, require_tool, run_cmd
 
@@ -57,7 +58,7 @@ def validate_clip(
         result["checks"].append({"name": "short_clip_allowed", "ok": bool(out.get("ok")), "value": video.get("codec_name"), "duration": duration})
     if source_clip and source_clip.exists():
         src = inspect_clip(source_clip, tools, accurate_video_bitrate=False)
-        src_audio = src.get("audio", [])
+        src_audio = compact_audio_source_streams(src) if audio_mode == "compact-stereo" else src.get("audio", [])
         out_audio = out.get("audio", [])
         if audio_mode == "compact-stereo":
             result["checks"].append(

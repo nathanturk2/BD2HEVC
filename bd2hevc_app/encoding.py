@@ -21,6 +21,21 @@ def compact_audio_channels(audio: dict[str, Any]) -> int:
     return 1 if channels == 1 else 2
 
 
+def compact_audio_source_streams(clip_info: dict[str, Any]) -> list[dict[str, Any]]:
+    streams: list[dict[str, Any]] = []
+    for audio in clip_info.get("audio") or []:
+        channels = safe_int(audio.get("channels"))
+        if channels is None or channels <= 0:
+            continue
+        streams.append(audio)
+    return streams
+
+
+def ffmpeg_audio_map_spec(audio: dict[str, Any], audio_ordinal: int) -> str:
+    stream_index = safe_int(audio.get("index"))
+    return f"0:{stream_index}" if stream_index is not None else f"0:a:{audio_ordinal}"
+
+
 def append_compact_audio_options(
     cmd: list[str],
     clip_info: dict[str, Any],
@@ -29,7 +44,7 @@ def append_compact_audio_options(
     mono_audio_bitrate: int,
 ) -> None:
     cmd.extend(["-c:a", "ac3"])
-    for index, audio in enumerate(clip_info.get("audio") or []):
+    for index, audio in enumerate(compact_audio_source_streams(clip_info)):
         channels = compact_audio_channels(audio)
         bitrate = mono_audio_bitrate if channels == 1 else stereo_audio_bitrate
         cmd.extend(
@@ -59,7 +74,7 @@ def transcode_compact_audio_tracks(
     verbose: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     ffmpeg = require_tool(tools, "ffmpeg")
-    audio_streams = clip_info.get("audio") or []
+    audio_streams = compact_audio_source_streams(clip_info)
     outputs: list[dict[str, Any]] = []
     if not audio_streams:
         return outputs, []
@@ -85,7 +100,7 @@ def transcode_compact_audio_tracks(
         cmd.extend(
             [
                 "-map",
-                f"0:a:{index}",
+                ffmpeg_audio_map_spec(audio, index),
                 "-vn",
                 "-sn",
                 "-dn",

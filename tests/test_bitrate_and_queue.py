@@ -391,9 +391,31 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(outputs[0]["channels"], 2)
         self.assertEqual(outputs[1]["channels"], 1)
         self.assertIn("-map", cmd)
-        self.assertIn("0:a:0", cmd)
-        self.assertIn("0:a:1", cmd)
+        self.assertIn("0:1", cmd)
+        self.assertIn("0:2", cmd)
         self.assertNotIn("0:s?", cmd)
+
+    def test_compact_audio_skips_unplayable_zero_channel_streams(self) -> None:
+        clip_info = {
+            "audio": [
+                {"index": 1, "codec_name": "pcm_bluray", "channels": 2, "language": "eng"},
+                {"index": 2, "codec_name": "pcm_bluray", "channels": 2, "language": "eng"},
+                {"index": 3, "codec_name": "mp3", "channels": 0},
+            ],
+        }
+        outputs, cmd = bd.transcode_compact_audio_tracks(
+            Path("in.m2ts"),
+            Path("work/00123.compact-audio"),
+            clip_info,
+            {"ffmpeg": "ffmpeg"},
+            dry_run=True,
+        )
+
+        self.assertEqual(len(outputs), 2)
+        self.assertIn("0:1", cmd)
+        self.assertIn("0:2", cmd)
+        self.assertNotIn("0:3", cmd)
+        self.assertEqual([Path(item["path"]).name for item in outputs], ["00123.audio00.ac3", "00123.audio01.ac3"])
 
     def test_main_title_cq_override_targets_longest_reencoded_cq_clip(self) -> None:
         clips = [
