@@ -7,7 +7,7 @@ chapters, and navigation metadata.
 The goal is a smaller backup that still behaves like the original disc in
 VLC/libbluray. BD2HEVC does not decrypt discs, does not include keys, and does
 not upscale video. The normal full-disc workflow keeps 1080p sources at 1080p
-and reencodes video clips longer than 10 seconds to 8-bit HEVC Main.
+and reencodes non-HEVC video clips longer than 10 seconds to 8-bit HEVC Main.
 
 License: GPL-3.0-only.
 
@@ -104,8 +104,8 @@ one completed encode to wait for later stages.
 
 For long conversions, use `start`. It creates the dry-run plan, queues the real
 conversion in the background, and prints the exact status commands to use.
-Background jobs run one at a time so multiple conversions do not fight over
-NVENC, disk I/O, or the same validation tools.
+Background jobs run one at a time so multiple conversions do not fight over the
+same encoder, disk I/O, or validation tools.
 
 ```bash
 python bd2hevc.py start "MY_DISC_BACKUP" "Converted UHD-BD/My Disc (BD) (UHD converted)"
@@ -194,7 +194,8 @@ python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
 ```
 
 Job files, logs, plans, and full reports are written under `reports/jobs/`.
-The final converted disc is written to the output folder shown by `start`.
+The final converted disc is written to the output folder shown by `start` or
+`queue`.
 
 ## Quality And Audio Recipes
 
@@ -236,10 +237,10 @@ python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-m
 ```
 
 This converts each audio track in reencoded clips to Blu-ray-friendly AC-3,
-using stereo for multi-channel sources and mono for mono sources. Defaults are
-`256k` for stereo and `128k` for mono; adjust them with
-`--stereo-audio-bitrate` and `--mono-audio-bitrate`. Audio passthrough remains
-the default.
+using stereo for multi-channel sources and mono for mono sources. PGS subtitles
+are still preserved from the source clip. Defaults are `256k` for stereo and
+`128k` for mono; adjust them with `--stereo-audio-bitrate` and
+`--mono-audio-bitrate`. Audio passthrough remains the default.
 
 ## VLC Compatibility Fixes
 
@@ -367,13 +368,15 @@ Windows:
 
 - FFmpeg can be installed with winget or another package manager.
 - MakeMKV is auto-detected from common Windows install folders.
-- tsMuxer is auto-detected from `tools\tsmuxer-2.7.0\tsMuxeR.exe`.
+- tsMuxer is auto-detected from the bundled `tools\tsmuxer\` folder, the legacy
+  `tools\tsmuxer-2.7.0\` folder, or `PATH`.
 - VLC is auto-detected from common Windows install folders.
 
 Linux:
 
-- Put `ffmpeg`, `ffprobe`, `tsmuxer` or `tsMuxeR`, `makemkvcon`, and `vlc` on
-  `PATH`.
+- Put required tools `ffmpeg`, `ffprobe`, and `tsmuxer` or `tsMuxeR` on `PATH`.
+  Put optional `makemkvcon` and `vlc` on `PATH` if you want MakeMKV validation
+  or VLC smoke tests.
 - BD2HEVC intentionally prefers native Linux tools on Linux/WSL and ignores
   Windows `.exe` tools that may appear through WSL interop.
 - Make sure your FFmpeg build lists the encoder you plan to use:
@@ -458,7 +461,7 @@ bd2hevc tools
 ## What It Changes
 
 - Copies the full source backup structure.
-- Reencodes video clips longer than 10 seconds to HEVC.
+- Reencodes non-HEVC video clips longer than 10 seconds to HEVC.
 - Passes audio and PGS subtitle streams through unchanged by default.
 - Optionally converts audio in reencoded clips to compact AC-3 stereo/mono with
   `--audio-mode compact-stereo`.
@@ -505,8 +508,10 @@ CQ 18. With `hevc_nvenc`, CQ clips use a lean HandBrake-like CQ command path
 instead of BD2HEVC's normal AQ/VBV-heavy movie tuning. It also avoids FFmpeg's
 `-bluray-compat` shortcut for those CQ clips because that option can raise
 bitrates at the same CQ value; BD2HEVC still keeps explicit AUD/GOP/metadata
-controls for authored disc playback. The CQ cutoff can be raised if you only
-want episode/movie-length clips to use CQ:
+controls for authored disc playback. `compact-cq` currently supports
+`hevc_nvenc`, `hevc_amf`, and `libx265`; use `balanced`, `smaller`, or another
+bitrate mode with `hevc_qsv`. The CQ cutoff can be raised if you only want
+episode/movie-length clips to use CQ:
 
 ```bash
 python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --compact-cq-min-duration 20m

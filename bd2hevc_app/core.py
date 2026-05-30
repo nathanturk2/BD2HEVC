@@ -3,8 +3,8 @@
 BD2HEVC full-disc Blu-ray HEVC conversion.
 
 This tool is built for local, unencrypted BDMV backups. It uses FFprobe/FFmpeg
-for stream inspection and NVENC HEVC encoding, tsMuxeR for Blu-ray M2TS
-authoring, and optionally MakeMKV/VLC for validation.
+for stream inspection and HEVC encoding, tsMuxeR for Blu-ray M2TS authoring, and
+optionally MakeMKV/VLC for validation.
 """
 
 from __future__ import annotations
@@ -1579,7 +1579,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"BD2HEVC {VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_tools = command_parser(sub, "tools", help="Show discovered external tools and NVENC support.", description="Show the external programs BD2HEVC found and whether hardware HEVC encoding is available.", examples="""
+    p_tools = command_parser(sub, "tools", help="Show discovered external tools and HEVC encoder support.", description="Show the external programs BD2HEVC found and whether hardware HEVC encoding is available.", examples="""
   py bd2hevc.py tools
   py bd2hevc.py tools --json
 """)
