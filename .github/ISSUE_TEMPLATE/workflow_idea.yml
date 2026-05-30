@@ -1,0 +1,33 @@
+name: Workflow or feature idea
+description: Suggest a workflow, preset, platform, or usability improvement.
+title: "[Idea]: "
+labels: ["enhancement"]
+body:
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This is about local BDMV folder backups or BD2HEVC's conversion workflow.
+          required: true
+        - label: This does not request decryption, keys, protected-disc bypassing, downloads, or copyrighted disc data.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What workflow would this improve?
+      description: Describe what you are trying to do and where BD2HEVC feels awkward or incomplete.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed behavior
+      description: Describe the command, preset, documentation, validation, or UI behavior you would like.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Environment or examples
+      description: Mention OS, encoder, disc type, player, and any similar tools or commands if relevant.

@@ -1,0 +1,27 @@
+# Suggested repository labels for BD2HEVC.
+# GitHub does not read this file by itself; it is here so maintainers can apply
+# the same label set with a label-sync tool or recreate it in the GitHub UI.
+
+- name: disc-compatibility
+  color: "7A5CFF"
+  description: Reports about a specific disc backup, menu, extra, gallery, or game.
+
+- name: diagnostic-report
+  color: "0E8A16"
+  description: Issue includes or needs a redacted BD2HEVC diagnostic bundle.
+
+- name: linux
+  color: "006B75"
+  description: Linux or WSL behavior.
+
+- name: encoder
+  color: "D93F0B"
+  description: FFmpeg encoder, bitrate, CQ, NVENC, QSV, AMF, or libx265 behavior.
+
+- name: vlc-libbluray
+  color: "1D76DB"
+  description: VLC/libbluray playback, Java, BD-J, or menu compatibility.
+
+- name: queue-progress
+  color: "FBCA04"
+  description: Background queue, status watch, progress parsing, or job control.

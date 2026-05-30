@@ -2,7 +2,11 @@
 
 ## GitHub Setup
 
-From the clean release folder:
+The public repository currently lives at:
+
+<https://github.com/nathanturk2/BD2HEVC>
+
+For a new mirror or fork, start from the clean release folder:
 
 ```bash
 git init
@@ -15,27 +19,29 @@ git push -u origin main
 
 Then on GitHub:
 
-1. Create a public repository named `bd2hevc`.
-2. Add the topics `blu-ray`, `bdmv`, `hevc`, `ffmpeg`, `tsmuxer`, `vlc`,
-   `libbluray`, `bd-j`, and `nvenc`.
+1. Create a public repository named `bd2hevc` or `BD2HEVC`.
+2. Add the topics `blu-ray`, `bdmv`, `hevc`, `h265`, `ffmpeg`, `tsmuxer`,
+   `vlc`, `libbluray`, `bd-j`, `nvenc`, `makemkv`, `python`, and
+   `physical-media`.
 3. Enable Issues and Discussions if you want users to report disc compatibility
-   results.
+   results. The repository includes issue forms and a suggested label set in
+   `.github/labels.yml`.
 4. Confirm the bundled CI workflow passes on GitHub Actions.
-5. Add a release tag when ready:
+5. Add an alpha release tag when ready:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag -a v0.1.0-alpha -m "BD2HEVC v0.1.0-alpha"
+git push origin v0.1.0-alpha
 ```
 
 ## Release Readiness Note
 
-`v0.1.0` should be presented as an alpha release, but the code structure is now
-reasonable for public development. The major low-level concerns are separated
-into modules: BD-J patching, bitrate planning, encoding, muxing, navigation
-metadata, output repair, progress rendering, queueing, scanning, tool discovery,
-validation, and output handling. The remaining `core` module is primarily
-orchestration and CLI glue.
+`v0.1.0-alpha` should be presented as an alpha release, but the code structure
+is now reasonable for public development. The major low-level concerns are
+separated into modules: BD-J patching, bitrate planning, encoding, muxing,
+navigation metadata, output repair, progress rendering, queueing, scanning,
+tool discovery, validation, and output handling. The remaining `core` module is
+primarily orchestration and CLI glue.
 
 Do not overpromise disc compatibility. The strongest claim is that the tested
 workflow preserves full-disc menus/extras and has worked across the local test
@@ -49,7 +55,8 @@ folder playback.
 
 ## Suggested First Post
 
-Keep the first public post narrow and careful:
+Use `docs/REDDIT_ANNOUNCEMENT.md` as the current draft. Keep the first public
+post narrow and careful:
 
 - It works on local, unencrypted BDMV folder backups.
 - It does not decrypt discs, provide keys, or include copyrighted assets.

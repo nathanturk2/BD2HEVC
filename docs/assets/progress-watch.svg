@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="300" viewBox="0 0 980 300" role="img" aria-labelledby="title desc">
+  <title id="title">BD2HEVC status watch progress view</title>
+  <desc id="desc">A terminal-style screenshot showing a BD2HEVC conversion progress bar, current clip, encoded clips, status, and log path.</desc>
+  <rect width="980" height="300" rx="10" fill="#101418"/>
+  <rect x="1" y="1" width="978" height="298" rx="10" fill="none" stroke="#2b333c"/>
+  <g font-family="Consolas, 'Cascadia Mono', 'Courier New', monospace" font-size="20" fill="#e8edf2">
+    <text x="28" y="44">Disc: Example Movie (BD) (UHD converted)</text>
+    <text x="28" y="76">Job: 20260530-Example_Movie</text>
+    <text x="28" y="120">[####################------------]  63.4% encoded  01:41:27 / 02:40:04  stage: muxing + encoding</text>
+    <text x="28" y="154">encoded clips: 18/28 complete</text>
+    <text x="28" y="188">muxing:   00021.m2ts  [##############----------]  57.8%  00:03:28 / 00:06:00</text>
+    <text x="28" y="222">encoding: 00022.m2ts  [########----------------]  33.1%  00:07:58 / 00:24:05  speed: 10.4x</text>
+    <text x="28" y="256">Status: running</text>
+    <text x="28" y="286">Log: reports/jobs/20260530-Example_Movie.log</text>
+  </g>
+</svg>

@@ -27,6 +27,7 @@ guaranteed.
 
 ## Table Of Contents
 
+- [Scope At A Glance](#scope-at-a-glance)
 - [Quick Start](#quick-start)
 - [Background Jobs](#background-jobs)
 - [Quality And Audio Recipes](#quality-and-audio-recipes)
@@ -42,6 +43,19 @@ guaranteed.
 - [Repair And Diagnostics](#repair-and-diagnostics)
 - [JSON Output](#json-output)
 - [Legal](#legal)
+
+## Scope At A Glance
+
+- Input: existing local `BDMV` folder backups that are already accessible to
+  normal media tools.
+- Output: a smaller full-disc folder backup with menus, extras, playlists,
+  BD-J, chapters, subtitles, and navigation metadata preserved.
+- Video: non-HEVC clips longer than 10 seconds are reencoded to HEVC/H.265; the
+  default workflow keeps the source resolution and does not upscale.
+- Audio: passed through by default, with optional compact AC-3 stereo/mono for
+  storage-limited collections.
+- Not included: decryption, keys, ripping from protected discs, downloads, or
+  copyrighted disc assets.
 
 ## Quick Start
 
@@ -139,6 +153,8 @@ In an interactive terminal, `--watch` redraws the same status block in place
 instead of appending a new progress bar every refresh. With no number it refreshes
 once per second. Add a number to choose another interval, for example
 `--watch 10`.
+
+![BD2HEVC status watch screenshot](docs/assets/progress-watch.svg)
 
 List recent jobs:
 
