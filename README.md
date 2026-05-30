@@ -306,7 +306,8 @@ The diagnostic bundle is designed for public bug reports. It includes:
 - BD2HEVC version, OS, Python, and discovered media tool versions.
 - A file manifest with names, sizes, and timestamps.
 - Redacted job metadata, plan, report, exit code, and a log tail when a matching
-  background job is found.
+  background job is found. The default log tail is 5000 lines, and the bundle
+  also includes a compact error-highlight file extracted from the full job log.
 - A lightweight validation report run without MakeMKV so physical optical drives
   are not touched.
 

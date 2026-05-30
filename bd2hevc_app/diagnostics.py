@@ -25,6 +25,11 @@ from .tools import ToolError, discover_tools, format_cmd, hidden_process_kwargs,
 
 TEXT_REPORT_SUFFIXES = {".json", ".log", ".txt"}
 RAW_DISC_SUFFIXES = {".m2ts", ".ssif", ".jar", ".bdjo", ".mobj", ".bdmv", ".clpi", ".mpls"}
+DEFAULT_DIAGNOSTIC_LOG_LINES = 5000
+LOG_HIGHLIGHT_PATTERN = re.compile(
+    r"(error|failed|failure|exception|traceback|critical|invalid|unsupported|could not|cannot|no such|jsondecodeerror|toolerror)",
+    re.IGNORECASE,
+)
 
 
 def safe_report_name(value: str) -> str:
@@ -245,6 +250,29 @@ def copy_redacted_report(path: Path, destination: Path, mapping: dict[str, str],
     return True
 
 
+def write_log_highlights(path: Path, destination: Path, mapping: dict[str, str], *, max_matches: int = 600) -> bool:
+    if not path.exists():
+        return False
+    matches: list[str] = []
+    for line in read_text_flexible(path).splitlines():
+        stripped = line.strip()
+        if not stripped or "BD2HEVC_PROGRESS" in stripped:
+            continue
+        if LOG_HIGHLIGHT_PATTERN.search(stripped):
+            matches.append(stripped[-2000:])
+    if not matches:
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    kept = matches[-max_matches:]
+    omitted = len(matches) - len(kept)
+    header = []
+    if omitted:
+        header.append(f"Earlier matching lines omitted: {omitted}")
+    header.append(f"Matching lines included: {len(kept)}")
+    destination.write_text(redact_text("\n".join(header + ["", *kept]) + "\n", mapping), encoding="utf-8")
+    return True
+
+
 def write_readme(destination: Path) -> None:
     destination.write_text(
         "\n".join(
@@ -270,7 +298,7 @@ def create_diagnostic_bundle(
     source: Path | None = None,
     job_identifier: str | None = None,
     output: Path | None = None,
-    log_lines: int = 500,
+    log_lines: int = DEFAULT_DIAGNOSTIC_LOG_LINES,
     run_validation: bool = True,
     zip_output: bool = True,
 ) -> dict[str, Any]:
@@ -339,7 +367,9 @@ def create_diagnostic_bundle(
                     copy_redacted_report(Path(str(value)), report_dir / filename, mapping)
             log_value = job.get("log")
             if log_value:
-                copy_redacted_report(Path(str(log_value)), report_dir / "job.log.tail.txt", mapping, max_lines=log_lines)
+                log_path = Path(str(log_value))
+                copy_redacted_report(log_path, report_dir / "job.log.tail.txt", mapping, max_lines=log_lines)
+                write_log_highlights(log_path, report_dir / "job.log.error-highlights.txt", mapping)
         if run_validation and target.exists():
             diagnostic["validation"] = run_light_validation(target, source, mapping)
 

@@ -63,6 +63,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertIn("Create a shareable diagnostic zip", diagnose_help)
         self.assertIn('py bd2hevc.py diagnose "Converted UHD-BD', diagnose_help)
+        self.assertIn("Default 5000", diagnose_help)
 
     def test_watch_lines_are_truncated_to_terminal_width(self) -> None:
         line = "Log: " + ("x" * 120)
@@ -742,6 +743,30 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(payload["target"]["counts_by_suffix"][".m2ts"], 1)
         self.assertTrue(payload["target"]["files"][0]["raw_disc_file"] or payload["target"]["files"][1]["raw_disc_file"])
         self.assertFalse((Path(result["bundle"]) / "BDMV").exists())
+
+    def test_diagnostic_log_highlights_extract_errors_from_full_log(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            log = root / "job.log"
+            log.write_text(
+                "\n".join(
+                    [
+                        "normal line",
+                        "BD2HEVC_PROGRESS encode-done 00001.m2ts",
+                        f"ffmpeg error: could not decode {root / 'Secret Disc' / 'BDMV' / 'STREAM' / '00001.m2ts'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            out = root / "highlights.txt"
+            mapping = diagnostics.redaction_map([root / "Secret Disc"])
+            written = diagnostics.write_log_highlights(log, out, mapping)
+            text = out.read_text(encoding="utf-8")
+
+        self.assertTrue(written)
+        self.assertIn("ffmpeg error", text)
+        self.assertIn("<path-1>", text)
+        self.assertNotIn("BD2HEVC_PROGRESS", text)
 
     def test_legacy_anime_cq18_alias_still_maps_to_compact_cq(self) -> None:
         plan = bd.equivalent_hevc_bitrate(

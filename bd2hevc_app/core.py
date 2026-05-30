@@ -63,7 +63,7 @@ from .config import (
     SPARSE_TIMING_MIN_RATIO,
     VERSION,
 )
-from .diagnostics import cmd_diagnose
+from .diagnostics import DEFAULT_DIAGNOSTIC_LOG_LINES, cmd_diagnose
 from .encoding import encode_to_hevc_m2ts, transcode_compact_audio_tracks
 from .muxing import (
     author_m2ts_split,
@@ -1762,7 +1762,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_diagnose.add_argument("--source", default=None, help="Original source backup for reference validation and comparison.")
     p_diagnose.add_argument("--job", default=None, help="Matching background job id or prefix when auto-detection is not enough.")
     p_diagnose.add_argument("--output", default=None, help="Destination zip or folder. Defaults to reports/diagnostics/<disc>-<timestamp>.zip.")
-    p_diagnose.add_argument("--log-lines", type=int, default=500, help="Number of job log lines to include from the end of the log.")
+    p_diagnose.add_argument("--log-lines", type=int, default=DEFAULT_DIAGNOSTIC_LOG_LINES, help=f"Number of job log lines to include from the end of the log. Default {DEFAULT_DIAGNOSTIC_LOG_LINES}.")
     p_diagnose.add_argument("--no-validation", action="store_true", help="Skip the lightweight no-MakeMKV validation pass.")
     p_diagnose.add_argument("--no-zip", action="store_true", help="Write an unpacked diagnostic folder instead of a zip file.")
     p_diagnose.add_argument("--json", action="store_true", help="Print machine-readable command output.")
