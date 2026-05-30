@@ -71,7 +71,8 @@ python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --ref
 - Short human summaries by default, with JSON available through `--json` and
   `--report`.
 - Preserves menus, extras, playlists, audio, subtitles, and BD-J files.
-- Reencodes clips longer than 10 seconds using NVENC HEVC.
+- Reencodes clips longer than 10 seconds to HEVC. NVENC is the tested default,
+  with QSV, AMF, and `libx265` selectable when FFmpeg supports them.
 - Preserves sparse menu/gallery clip timing during HEVC replacement.
 - Uses no-B-frame HEVC for sparse menu/gallery replacements to ease VLC/D3D11
   playback.

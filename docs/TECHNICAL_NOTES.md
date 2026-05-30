@@ -4,7 +4,9 @@ BD2HEVC is built around a conservative full-disc workflow:
 
 1. Copy the original backup structure.
 2. Inspect every clip in `BDMV/STREAM`.
-3. Reencode video clips longer than 10 seconds to HEVC with NVENC.
+3. Reencode video clips longer than 10 seconds to HEVC. The tested default
+   encoder is NVENC, with QSV, AMF, and `libx265` also supported when FFmpeg
+   provides them.
 4. Pass audio and PGS subtitle streams through unchanged.
 5. Remux replacement clips with tsMuxer.
 6. Patch the Blu-ray navigation metadata that describes the primary video stream.
@@ -218,8 +220,10 @@ make the command fail.
 The code discovers `ffmpeg`, `ffprobe`, `tsmuxer`/`tsMuxeR`, `makemkvcon`, and
 `vlc` from `PATH`. On Linux and WSL it prefers native POSIX tools and ignores
 Windows `.exe` tools that may appear through mounted Windows paths. Linux
-support expects an FFmpeg build with `hevc_nvenc`, a working NVIDIA driver
-stack, and tsMuxer available as an executable.
+support expects an FFmpeg build with at least one supported HEVC encoder
+(`hevc_nvenc`, `hevc_qsv`, `hevc_amf`, or `libx265`) and tsMuxer available as an
+executable. The default encoder path still expects `hevc_nvenc` and a working
+NVIDIA driver stack unless you pass another `--encoder`.
 
 Run:
 

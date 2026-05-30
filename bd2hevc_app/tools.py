@@ -133,8 +133,14 @@ def require_hevc_encoder(tools: dict[str, Any], encoder: str) -> None:
     if encoder not in HEVC_ENCODERS:
         raise ToolError(f"Unsupported HEVC encoder: {encoder}")
     if encoder not in (tools.get("hevc_encoders") or []):
-        available = ", ".join(tools.get("hevc_encoders") or []) or "none"
-        raise ToolError(f"FFmpeg does not report requested HEVC encoder {encoder}. Available HEVC encoders: {available}")
+        available_encoders = tools.get("hevc_encoders") or []
+        available = ", ".join(available_encoders) or "none"
+        fallback = next(
+            (candidate for candidate in ("libx265", "hevc_qsv", "hevc_amf") if candidate in available_encoders),
+            None,
+        )
+        hint = f" Try rerunning with --encoder {fallback}." if fallback else ""
+        raise ToolError(f"FFmpeg does not report requested HEVC encoder {encoder}. Available HEVC encoders: {available}.{hint}")
 
 
 def run_cmd(

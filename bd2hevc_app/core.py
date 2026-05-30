@@ -1526,7 +1526,7 @@ def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: bool = False) -> None:
-    parser.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="HEVC encoder to use. Hardware encoders can overlap next-clip encoding with later audio/muxing stages; libx265 stays serial.")
+    parser.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="HEVC encoder to use. Default is hevc_nvenc. Use --encoder libx265, hevc_qsv, or hevc_amf if NVENC is unavailable and your FFmpeg build supports that encoder. Hardware encoders can overlap next-clip encoding with later audio/muxing stages; libx265 stays serial.")
     if include_encode_ahead:
         parser.add_argument("--no-encode-ahead", action="store_true", help="Disable hardware encode-ahead pipelining and run encode/mux serially.")
         parser.add_argument("--encode-ahead-depth", type=int, default=3, help="Maximum completed HEVC temp clips allowed to wait for later audio/muxing stages. Hardware encoders only; default 3.")
@@ -1610,6 +1610,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto = command_parser(sub, "auto", help="Faithful full-disc conversion. Only the source backup path is required.", description="Run a foreground full-disc conversion that preserves menus, extras, subtitles, and audio by default.", examples="""
   py bd2hevc.py auto "BD backups\\Movie Disc"
   py bd2hevc.py auto "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py auto "BD backups\\Movie Disc" --encoder libx265
   py bd2hevc.py auto "BD backups\\Movie Disc" --bitrate-mode compact-cq --compact-cq-value 20 --audio-mode compact-stereo
 """)
     p_auto.add_argument("source", help="Source BD backup folder.")
@@ -1662,6 +1663,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_queue = command_parser(sub, "queue", help="Queue multiple full-disc conversions that run one at a time.", description="Queue one or more source folders. Jobs run one at a time in the background.", examples="""
   py bd2hevc.py queue "BD backups\\Movie Disc" --output-dir "Converted UHD-BD"
   py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
+  py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --encoder libx265
   py bd2hevc.py queue "Disc 1" "Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
   py bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
   py bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --top-n-cq 3 18

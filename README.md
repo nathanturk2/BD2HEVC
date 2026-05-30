@@ -84,14 +84,21 @@ JSON report saved as well.
 
 BD2HEVC targets HEVC/H.265 regardless of encoder. The tested default is
 `--encoder hevc_nvenc`, and you can also select `hevc_qsv`, `hevc_amf`, or
-`libx265` when your FFmpeg build supports them. Full-disc conversion uses a
-small encode-to-mux queue for hardware HEVC encoders: one clip encodes while the
-single muxer finishes earlier clips. When `--audio-mode compact-stereo` is also
-enabled, compact audio gets its own middle stage so audio for the next clip can
-transcode while the previous clip is muxing. CPU `libx265` stays serial. Use
-`--no-encode-ahead` to disable that pipeline even with hardware encoding, or
-`--encode-ahead-depth 1` to allow only one completed encode to wait for later
-stages.
+`libx265` when your FFmpeg build supports them. If NVENC is unavailable, rerun
+with an explicit alternative encoder, for example:
+
+```bash
+python bd2hevc.py auto "MY_DISC_BACKUP" --encoder libx265
+python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --encoder hevc_qsv
+```
+
+Full-disc conversion uses a small encode-to-mux queue for hardware HEVC
+encoders: one clip encodes while the single muxer finishes earlier clips. When
+`--audio-mode compact-stereo` is also enabled, compact audio gets its own middle
+stage so audio for the next clip can transcode while the previous clip is
+muxing. CPU `libx265` stays serial. Use `--no-encode-ahead` to disable that
+pipeline even with hardware encoding, or `--encode-ahead-depth 1` to allow only
+one completed encode to wait for later stages.
 
 ## Background Jobs
 
@@ -330,12 +337,13 @@ Supported operating systems:
 Required:
 
 - Python 3.10+
-- FFmpeg and FFprobe with `hevc_nvenc`
-- NVIDIA GPU/driver capable of NVENC HEVC
+- FFmpeg and FFprobe with at least one supported HEVC encoder:
+  `hevc_nvenc`, `hevc_qsv`, `hevc_amf`, or `libx265`
 - tsMuxer 2.7 or newer
 
 Optional but recommended:
 
+- NVIDIA GPU/driver capable of NVENC HEVC for the tested default encoder path
 - MakeMKV CLI (`makemkvcon` or `makemkvcon64`) for optional title scanning and
   structural validation
 - VLC for headless playback smoke tests
@@ -368,10 +376,10 @@ Linux:
   `PATH`.
 - BD2HEVC intentionally prefers native Linux tools on Linux/WSL and ignores
   Windows `.exe` tools that may appear through WSL interop.
-- Make sure your FFmpeg build lists `hevc_nvenc`:
+- Make sure your FFmpeg build lists the encoder you plan to use:
 
 ```bash
-ffmpeg -hide_banner -encoders | grep hevc_nvenc
+ffmpeg -hide_banner -encoders | grep -E 'hevc_nvenc|hevc_qsv|hevc_amf|libx265'
 ```
 
 ## VLC Java Setup For Menus
