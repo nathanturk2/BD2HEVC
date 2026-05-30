@@ -466,6 +466,30 @@ class CommandConstructionTests(unittest.TestCase):
         with self.assertRaisesRegex(bd.ToolError, "cannot be used"):
             bd.validate_cq_override_args(args)
 
+    def test_compact_cq_rejects_qsv_with_helpful_fallbacks(self) -> None:
+        args = argparse.Namespace(
+            encoder="hevc_qsv",
+            bitrate_preset_file=None,
+            bitrate_mode="compact-cq",
+            hevc_bitrate_factor=None,
+        )
+
+        with self.assertRaisesRegex(bd.ToolError, "compact-cq.*hevc_qsv") as raised:
+            bd.validate_encoder_bitrate_compatibility(args)
+        message = str(raised.exception)
+        self.assertIn("--encoder libx265", message)
+        self.assertIn("--bitrate-mode balanced --encoder hevc_qsv", message)
+
+    def test_qsv_accepts_bitrate_modes(self) -> None:
+        args = argparse.Namespace(
+            encoder="hevc_qsv",
+            bitrate_preset_file=None,
+            bitrate_mode="balanced",
+            hevc_bitrate_factor=None,
+        )
+
+        bd.validate_encoder_bitrate_compatibility(args)
+
     def test_background_command_carries_compact_cq_cutoff(self) -> None:
         args = argparse.Namespace(
             source="Disc",

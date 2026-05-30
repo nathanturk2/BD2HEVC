@@ -34,6 +34,7 @@ from .bitrate import (
     equivalent_hevc_bitrate,
     format_duration,
     mbps,
+    normalize_bitrate_mode,
     parse_bitrate_arg,
     parse_duration_arg,
     parse_rate,
@@ -42,6 +43,7 @@ from .bitrate import (
     safe_int,
 )
 from .config import (
+    ANIME_CQ_PRESET,
     AUDIO_MODES,
     ANIME_CQ_VALUE,
     BITRATE_MODES,
@@ -178,6 +180,20 @@ def validate_cq_override_args(args: argparse.Namespace) -> None:
         raise ToolError("--top-n-cq COUNT must be at least 1")
     if cq_value < 0 or cq_value > 51:
         raise ToolError("--top-n-cq CQ must be between 0 and 51")
+
+
+def validate_encoder_bitrate_compatibility(args: argparse.Namespace) -> None:
+    encoder = selected_hevc_encoder(args)
+    options = bitrate_options_from_args(args)
+    mode = normalize_bitrate_mode(str(options.get("mode") or "balanced"))
+    if encoder == "hevc_qsv" and mode == ANIME_CQ_PRESET and not options.get("factor_override"):
+        raise ToolError(
+            "compact-cq uses CQ rate control, but BD2HEVC does not currently support compact-cq with --encoder hevc_qsv.\n"
+            "Use a CQ-capable encoder instead, for example:\n"
+            "  python bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo --encoder libx265\n"
+            "Or keep Intel QSV and choose a bitrate mode instead, for example:\n"
+            "  python bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\" --bitrate-mode balanced --encoder hevc_qsv"
+        )
 
 
 def apply_main_title_cq_override(clips: list[dict[str, Any]], cq_value: int | None) -> dict[str, Any] | None:
@@ -930,6 +946,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
     for key in ("ffmpeg", "ffprobe", "tsmuxer"):
         require_tool(tools, key)
     require_hevc_encoder(tools, selected_hevc_encoder(args))
+    validate_encoder_bitrate_compatibility(args)
     if args.mode == "movie-only":
         result = convert_movie_only(args, tools)
     else:
@@ -1142,6 +1159,7 @@ def cmd_reencode_replacements(args: argparse.Namespace) -> int:
     for key in ("ffmpeg", "ffprobe", "tsmuxer"):
         require_tool(tools, key)
     require_hevc_encoder(tools, selected_hevc_encoder(args))
+    validate_encoder_bitrate_compatibility(args)
     source = Path(args.source).resolve()
     output = Path(args.output).resolve()
     source_roots = find_disc_roots([source])
@@ -1201,6 +1219,7 @@ def cmd_repair_output(args: argparse.Namespace) -> int:
     for key in ("ffmpeg", "ffprobe", "tsmuxer"):
         require_tool(tools, key)
     require_hevc_encoder(tools, selected_hevc_encoder(args))
+    validate_encoder_bitrate_compatibility(args)
     source = Path(args.source).resolve()
     output = Path(args.output).resolve()
     source_roots = find_disc_roots([source])
@@ -1430,6 +1449,7 @@ def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -
     for key in ("ffmpeg", "ffprobe", "tsmuxer"):
         require_tool(tools, key)
     require_hevc_encoder(tools, selected_hevc_encoder(args))
+    validate_encoder_bitrate_compatibility(args)
     source = Path(args.source).resolve()
     roots = find_disc_roots([source])
     if not roots:
