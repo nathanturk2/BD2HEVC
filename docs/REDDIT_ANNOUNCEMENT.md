@@ -31,17 +31,16 @@ BD2HEVC works on an existing local BDMV backup and:
 - keeps the original resolution; no upscaling in the normal workflow
 
 It does not download media, provide keys, decrypt discs, or bypass copy
-protection. It expects an already accessible BDMV folder backup.
+protection. It expects a BDMV folder backup you already have.
 
 GitHub:
 https://github.com/nathanturk2/BD2HEVC
 
-So far I have tried well over a dozen disc backups across movies, TV/anime
-discs, bonus discs, galleries, and BD-J interactive content, and the converted
-outputs available for spot checks currently work in VLC/libbluray. That said,
-Blu-ray menus are weird, so I would especially appreciate feedback from people
-with unusual BD-J discs, menu-heavy releases, TV/anime discs, or bonus-disc
-workflows.
+So far I have tried dozens of disc backups across movies, TV/anime discs, bonus
+discs, galleries, and BD-J interactive content, and the converted outputs
+available for spot checks currently work in VLC/libbluray. That said, Blu-ray
+menus are weird, so I would especially appreciate feedback from people with
+unusual BD-J discs, menu-heavy releases, TV/anime discs, or bonus-disc workflows.
 
 If something breaks, BD2HEVC has a `diagnose` command that creates a redacted
 support bundle without including media files, keys, or BD-J JARs. This started
