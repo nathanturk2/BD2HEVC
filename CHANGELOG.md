@@ -78,6 +78,15 @@
 - Added `--top-n-cq COUNT CQ` for episode discs, letting the longest reencoded
   CQ clips use a different CQ from extras; mutually exclusive with
   `--main-title-cq`.
+- Added unified quality selectors: `--quality`, `--main-title-quality`,
+  `--top-n-quality`, and repeatable `--clip-quality`, with support for bitrate
+  presets, `cq:N`, and `copy`/`no-reencode`.
+- Added `clips` command to list M2TS clip ids, durations, codecs, source
+  bitrates, and planned quality so users can choose clip-specific overrides
+  without reading raw JSON.
+- Added `--copy-clips` / `--exclude-clips` for preserving selected source clips
+  untouched when a menu, game, or authored still-video clip should not be
+  reencoded.
 - Compact stereo audio now skips unplayable zero-channel streams that FFprobe
   can misidentify as audio, and maps source audio by stream index.
 - Improved generated output names with acronym and Roman numeral preservation,

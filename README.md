@@ -31,6 +31,7 @@ guaranteed.
 - [Quick Start](#quick-start)
 - [Background Jobs](#background-jobs)
 - [Quality And Audio Recipes](#quality-and-audio-recipes)
+- [Clip And Quality Overrides](#clip-and-quality-overrides)
 - [VLC Compatibility Fixes](#vlc-compatibility-fixes)
 - [Normal Validation](#normal-validation)
 - [Automated Support Reports](#automated-support-reports)
@@ -89,6 +90,12 @@ Preview what would be reencoded without writing an output:
 
 ```bash
 python bd2hevc.py auto "MY_DISC_BACKUP" --dry-run
+```
+
+List clip ids, durations, codecs, and the quality BD2HEVC would use:
+
+```bash
+python bd2hevc.py clips "MY_DISC_BACKUP"
 ```
 
 The foreground command prints progress automatically and ends with a short
@@ -218,38 +225,110 @@ The final converted disc is written to the output folder shown by `start` or
 Use compact CQ for episode-heavy discs or very large movie discs:
 
 ```bash
-python bd2hevc.py queue "Anime Disc 1" "Anime Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
+python bd2hevc.py queue "Anime Disc 1" "Anime Disc 2" --output-dir "Converted UHD-BD" --quality cq:20
 ```
 
-`compact-cq` keeps the meaning of CQ by using the requested CQ level on each
-clip that is long enough to be reencoded.
+`--quality` is the general video policy for clips that BD2HEVC would normally
+reencode. It accepts bitrate presets (`smaller`, `balanced`, `transparent`,
+`source-ratio`, `compact-cq`), CQ values (`cq:18`, `cq:20`), or
+`copy`/`no-reencode`.
 
 For storage-limited movie collections, you can spend more bits on the main
 feature while keeping extras compact:
 
 ```bash
-python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18
+python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality cq:20 --main-title-quality cq:18
 ```
 
-`--main-title-cq` applies only to the longest reencoded CQ clip, which is the
-usual single-file main movie on many Blu-ray backups. Lower CQ means larger and
-higher quality.
+`--main-title-quality` applies only to the longest reencode-eligible clip, which
+is the usual single-file main movie on many Blu-ray backups. Lower CQ means
+larger and higher quality.
 
-For episode discs, use `--top-n-cq COUNT CQ` instead. This applies the chosen CQ
-to the longest reencoded CQ clips, which lets a disc with three episodes keep
-those episodes at higher quality while extras stay at the general compact CQ:
+For episode discs, use `--top-n-quality COUNT QUALITY` instead. This applies the
+chosen quality to the longest reencode-eligible clips, which lets a disc with
+three episodes keep those episodes at higher quality while extras stay at the
+general compact CQ:
 
 ```bash
-python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --top-n-cq 3 18
+python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality cq:20 --top-n-quality 3 cq:18
 ```
 
-`--top-n-cq` and `--main-title-cq` are mutually exclusive.
+`--top-n-quality` and `--main-title-quality` are mutually exclusive. The older
+spellings `--bitrate-mode compact-cq --compact-cq-value 20`, `--main-title-cq
+18`, and `--top-n-cq 3 18` still work.
+
+## Clip And Quality Overrides
+
+Quality selection is layered:
+
+1. `--quality` chooses what happens to every clip that BD2HEVC would normally
+   reencode.
+2. A main-title or top-N override can retarget the longest clip or longest N
+   clips.
+3. Named clip overrides can handle odd cases discovered from `clips`, `scan`, or
+   `--dry-run`.
+4. `--copy-clips` wins last and leaves named clips untouched.
+
+Preview clip ids and durations before choosing overrides:
+
+```bash
+python bd2hevc.py clips "Disc"
+python bd2hevc.py clips "Disc" --quality cq:20 --top-n-quality 3 cq:18
+```
+
+Use any quality for the main title:
+
+```bash
+python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality smaller --main-title-quality transparent
+```
+
+Use any quality for the longest N clips:
+
+```bash
+python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality smaller --top-n-quality 3 balanced
+```
+
+Use CQ as a selector-specific override:
+
+```bash
+python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality cq:20 --top-n-quality 3 cq:18
+```
+
+Use copy/no-reencode as a quality choice. This example copies everything except
+the three longest clips, which are reencoded at CQ 18:
+
+```bash
+python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality copy --top-n-quality 3 cq:18
+```
+
+Target a specific clip by M2TS id. This is useful after `python bd2hevc.py clips
+"Disc"` or `python bd2hevc.py auto "Disc" --dry-run` shows a clip that needs
+different handling:
+
+```bash
+python bd2hevc.py auto "Disc" --clip-quality 00012 transparent
+python bd2hevc.py auto "Disc" --clip-quality 00012 cq:20
+python bd2hevc.py auto "Disc" --clip-quality 00012 copy
+```
+
+Exclude clips from reencoding when a menu/game/still-video clip behaves better
+as the source stream:
+
+```bash
+python bd2hevc.py auto "Disc" --copy-clips 00012 00045
+```
+
+`--exclude-clips` is accepted as an alias for `--copy-clips`. Copied clips keep
+their original codec and are not patched as HEVC, so use this only for clips you
+intentionally want preserved exactly as they are in the source backup. Main-title
+and top-N overrides are mutually exclusive with each other; named clip overrides
+can be combined with either one.
 
 If the playback setup is stereo, `--audio-mode compact-stereo` can save a lot of
 space on discs with TrueHD/DTS-HD and many dub tracks:
 
 ```bash
-python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
+python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
 ```
 
 This converts each audio track in reencoded clips to Blu-ray-friendly AC-3,
@@ -508,6 +587,16 @@ clips at or below 10 seconds are copied.
 Presets:
 
 ```bash
+python bd2hevc.py auto "Disc" --quality smaller
+python bd2hevc.py auto "Disc" --quality balanced
+python bd2hevc.py auto "Disc" --quality transparent
+python bd2hevc.py auto "Disc" --quality source-ratio
+python bd2hevc.py auto "Disc" --quality cq:20
+```
+
+The older bitrate flags are still available and are what preset JSON files use:
+
+```bash
 python bd2hevc.py auto "Disc" --bitrate-mode smaller
 python bd2hevc.py auto "Disc" --bitrate-mode balanced
 python bd2hevc.py auto "Disc" --bitrate-mode transparent
@@ -537,13 +626,14 @@ The CQ value can be adjusted too. Higher CQ values are smaller/lower quality;
 lower CQ values are larger/higher quality:
 
 ```bash
+python bd2hevc.py auto "Disc" --quality cq:20
 python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --compact-cq-value 20
 ```
 
 For anime encodes similar to HandBrake's H.265 10-bit option, add:
 
 ```bash
-python bd2hevc.py auto "Disc" --bitrate-mode compact-cq --hevc-bit-depth 10
+python bd2hevc.py auto "Disc" --quality cq:20 --hevc-bit-depth 10
 ```
 
 Custom presets can be put in a JSON file so repeat conversions do not need a
@@ -589,7 +679,7 @@ edition or region behaves identically.
 | --- | --- | --- |
 | Movie discs | Dune, Dune Part Two, Groundhog Day, The Princess Bride, Ferris Bueller's Day Off, Interstellar, Tenet, The Truman Show, Walter Mitty, Goodbye Mr. Chips | Main playback, menu return, and extras workflows have been spot checked in VLC. |
 | Bonus and non-feature discs | Interstellar bonus disc, Back to the Future bonus disc | Handles discs without an obvious single main title. |
-| Episode and compact CQ discs | One Punch Man, Baccano!, Tensura/Re:Zero-style episode discs, BBC Pride and Prejudice | Covers multi-episode layouts, `compact-cq`, and `--top-n-cq` workflows. |
+| Episode and compact CQ discs | One Punch Man, Baccano!, Tensura/Re:Zero-style episode discs, BBC Pride and Prejudice | Covers multi-episode layouts, `compact-cq`, `--quality cq:N`, and `--top-n-quality` workflows. |
 | Interactive BD-J extras | Speed, The Truman Show galleries, game-containing discs | Covers BD-J games, galleries, and menu timing repairs after CLPI/navigation fixes. |
 | Optional validation helpers | MakeMKV title scanning, VLC smoke logs, diagnostic bundles | Useful for catching structure/player issues without sharing disc assets. |
 

@@ -261,6 +261,24 @@ def append_option(argv: list[str], flag: str, value: Any, default: Any = None) -
         argv.extend([flag, str(value)])
 
 
+def flatten_cli_values(values: Any) -> list[str]:
+    flattened: list[str] = []
+    for value in values or []:
+        if isinstance(value, (list, tuple)):
+            flattened.extend(str(item) for item in value)
+        else:
+            flattened.append(str(value))
+    return flattened
+
+
+def flatten_cli_pairs(values: Any) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for value in values or []:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            pairs.append((str(value[0]), str(value[1])))
+    return pairs
+
+
 def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Path, plan_path: Path | None = None) -> list[str]:
     script = ROOT / "bd2hevc.py"
     argv = [sys.executable, str(script), "auto", str(Path(args.source).resolve()), str(output)]
@@ -283,6 +301,7 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--encode-ahead-depth", getattr(args, "encode_ahead_depth", 3), 3)
     if getattr(args, "bitrate_preset_file", None):
         argv.extend(["--bitrate-preset-file", str(Path(args.bitrate_preset_file).resolve())])
+    append_option(argv, "--quality", getattr(args, "quality", None))
     append_option(argv, "--bitrate-mode", getattr(args, "bitrate_mode", "balanced"), "balanced")
     append_option(argv, "--hevc-bitrate-factor", getattr(args, "hevc_bitrate_factor", None))
     append_option(argv, "--min-video-bitrate", getattr(args, "min_video_bitrate", 2_000_000), 2_000_000)
@@ -291,10 +310,27 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--bufsize-multiplier", getattr(args, "bufsize_multiplier", 2.0), 2.0)
     append_option(argv, "--compact-cq-value", getattr(args, "compact_cq_value", ANIME_CQ_VALUE), ANIME_CQ_VALUE)
     append_option(argv, "--compact-cq-min-duration", getattr(args, "anime_cq_min_duration", DEFAULT_ANIME_CQ_MIN_DURATION), DEFAULT_ANIME_CQ_MIN_DURATION)
+    append_option(argv, "--main-title-quality", getattr(args, "main_title_quality", None))
+    append_option(argv, "--main-title-bitrate-mode", getattr(args, "main_title_bitrate_mode", None))
     append_option(argv, "--main-title-cq", getattr(args, "main_title_cq", None))
+    top_n_quality = getattr(args, "top_n_quality", None)
+    if top_n_quality:
+        argv.extend(["--top-n-quality", str(top_n_quality[0]), str(top_n_quality[1])])
+    top_n_mode = getattr(args, "top_n_bitrate_mode", None)
+    if top_n_mode:
+        argv.extend(["--top-n-bitrate-mode", str(top_n_mode[0]), str(top_n_mode[1])])
     top_n_cq = getattr(args, "top_n_cq", None)
     if top_n_cq:
         argv.extend(["--top-n-cq", str(top_n_cq[0]), str(top_n_cq[1])])
+    for clip, quality in flatten_cli_pairs(getattr(args, "clip_quality", None)):
+        argv.extend(["--clip-quality", clip, quality])
+    for clip, mode in flatten_cli_pairs(getattr(args, "clip_bitrate_mode", None)):
+        argv.extend(["--clip-bitrate-mode", clip, mode])
+    for clip, cq_value in flatten_cli_pairs(getattr(args, "clip_cq", None)):
+        argv.extend(["--clip-cq", clip, cq_value])
+    copy_clips = flatten_cli_values(getattr(args, "copy_clips", None))
+    if copy_clips:
+        argv.extend(["--copy-clips", *copy_clips])
     append_option(argv, "--audio-mode", getattr(args, "audio_mode", DEFAULT_AUDIO_MODE), DEFAULT_AUDIO_MODE)
     append_option(argv, "--stereo-audio-bitrate", getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE), DEFAULT_STEREO_AUDIO_BITRATE)
     append_option(argv, "--mono-audio-bitrate", getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE), DEFAULT_MONO_AUDIO_BITRATE)

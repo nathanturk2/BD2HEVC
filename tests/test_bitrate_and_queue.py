@@ -20,6 +20,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("Command help:", help_text)
         self.assertIn("py bd2hevc.py <command> --help", help_text)
         self.assertIn("py bd2hevc.py queue --help", help_text)
+        self.assertIn('py bd2hevc.py clips "BD backups', help_text)
 
         with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
             with self.assertRaises(SystemExit) as raised:
@@ -30,6 +31,16 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("Examples:", queue_help)
         self.assertIn('Examples:\n  py bd2hevc.py queue "BD backups', queue_help)
         self.assertIn('py bd2hevc.py queue "BD backups', queue_help)
+
+        with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["clips", "--help"])
+            clips_help = buffer.getvalue()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("--quality", clips_help)
+        self.assertIn("--top-n-quality", clips_help)
+        self.assertIn("--clip-quality", clips_help)
 
     def test_public_modules_import_core_helpers(self) -> None:
         self.assertEqual(config.VERSION, bd.VERSION)
@@ -430,19 +441,19 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertNotIn("0:3", cmd)
         self.assertEqual([Path(item["path"]).name for item in outputs], ["00123.audio00.ac3", "00123.audio01.ac3"])
 
-    def test_main_title_cq_override_targets_longest_reencoded_cq_clip(self) -> None:
+    def test_main_title_cq_override_targets_longest_reencoded_clip(self) -> None:
         clips = [
             {"file": "00001.m2ts", "action": "reencode", "duration": 30.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
             {"file": "00002.m2ts", "action": "reencode", "duration": 7200.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
             {"file": "00003.m2ts", "action": "reencode", "duration": 8000.0, "video": {"target_hevc": {"rate_control": "vbr", "target_bps": 5_000_000}}},
         ]
         report = bd.apply_main_title_cq_override(clips, 18)
-        self.assertEqual(report["file"], "00002.m2ts")
+        self.assertEqual(report["file"], "00003.m2ts")
         self.assertEqual(clips[0]["video"]["target_hevc"]["cq"], 20)
-        self.assertEqual(clips[1]["video"]["target_hevc"]["cq"], 18)
-        self.assertNotIn("cq", clips[2]["video"]["target_hevc"])
+        self.assertEqual(clips[1]["video"]["target_hevc"]["cq"], 20)
+        self.assertEqual(clips[2]["video"]["target_hevc"]["cq"], 18)
 
-    def test_top_n_cq_override_targets_longest_reencoded_cq_clips(self) -> None:
+    def test_top_n_cq_override_targets_longest_reencoded_clips(self) -> None:
         clips = [
             {"file": "00001.m2ts", "action": "reencode", "duration": 30.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
             {"file": "00002.m2ts", "action": "reencode", "duration": 7200.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
@@ -454,11 +465,166 @@ class CommandConstructionTests(unittest.TestCase):
         report = bd.apply_top_n_cq_override(clips, [2, 18])
 
         self.assertEqual(report["matched_count"], 2)
-        self.assertEqual([item["file"] for item in report["clips"]], ["00002.m2ts", "00003.m2ts"])
+        self.assertEqual([item["file"] for item in report["clips"]], ["00004.m2ts", "00002.m2ts"])
         self.assertEqual(clips[0]["video"]["target_hevc"]["cq"], 20)
         self.assertEqual(clips[1]["video"]["target_hevc"]["cq"], 18)
-        self.assertEqual(clips[2]["video"]["target_hevc"]["cq"], 18)
-        self.assertNotIn("cq", clips[3]["video"]["target_hevc"])
+        self.assertEqual(clips[2]["video"]["target_hevc"]["cq"], 20)
+        self.assertEqual(clips[3]["video"]["target_hevc"]["cq"], 18)
+
+    def test_main_title_bitrate_mode_override_can_use_any_preset(self) -> None:
+        clips = [
+            {
+                "file": "00001.m2ts",
+                "action": "reencode",
+                "duration": 100.0,
+                "video": {
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 23.976,
+                    "source_video_bitrate": 20_000_000,
+                    "target_hevc": {"mode": "balanced", "rate_control": "vbr", "target_bps": 10_000_000},
+                },
+            },
+            {
+                "file": "00002.m2ts",
+                "action": "reencode",
+                "duration": 200.0,
+                "video": {
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 23.976,
+                    "source_video_bitrate": 20_000_000,
+                    "target_hevc": {"mode": "balanced", "rate_control": "vbr", "target_bps": 10_000_000},
+                },
+            },
+        ]
+
+        report = bd.apply_main_title_bitrate_mode_override(clips, "transparent", {"mode": "balanced"})
+
+        self.assertEqual(report["file"], "00002.m2ts")
+        self.assertEqual(clips[1]["video"]["target_hevc"]["mode"], "transparent")
+        self.assertGreater(clips[1]["video"]["target_hevc"]["target_bps"], clips[0]["video"]["target_hevc"]["target_bps"])
+
+    def test_named_clip_quality_and_copy_overrides(self) -> None:
+        clips = [
+            {
+                "file": "00001.m2ts",
+                "action": "reencode",
+                "duration": 100.0,
+                "video": {
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 23.976,
+                    "source_video_bitrate": 20_000_000,
+                    "target_hevc": {"mode": "balanced", "rate_control": "vbr", "target_bps": 10_000_000},
+                },
+            },
+            {
+                "file": "00002.m2ts",
+                "action": "reencode",
+                "duration": 80.0,
+                "video": {
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 23.976,
+                    "source_video_bitrate": 20_000_000,
+                    "target_hevc": {"mode": "balanced", "rate_control": "vbr", "target_bps": 10_000_000},
+                },
+            },
+        ]
+
+        quality = bd.apply_named_clip_quality_overrides(clips, {"mode": "balanced"}, clip_bitrate_mode=[["00001", "smaller"]])
+        copied = bd.apply_clip_copy_overrides(clips, [["00002"]])
+
+        self.assertEqual(quality["matched_count"], 1)
+        self.assertEqual(clips[0]["video"]["target_hevc"]["mode"], "smaller")
+        self.assertEqual(copied["matched_count"], 1)
+        self.assertEqual(clips[1]["action"], "copy")
+
+    def test_quality_spec_supports_cq_and_copy(self) -> None:
+        cq = bd.parse_quality_spec("cq:20", option="--quality")
+        copy_spec = bd.parse_quality_spec("no-reencode", option="--quality")
+
+        self.assertEqual(cq["mode"], "compact-cq")
+        self.assertEqual(cq["cq"], 20)
+        self.assertEqual(copy_spec["action"], "copy")
+
+    def test_general_copy_with_top_n_cq_reencodes_only_longest(self) -> None:
+        clips = [
+            {
+                "file": "00001.m2ts",
+                "action": "reencode",
+                "duration": 300.0,
+                "video": {"codec_name": "h264", "width": 1920, "height": 1080, "fps": 23.976, "source_video_bitrate": 20_000_000, "target_hevc": {}},
+            },
+            {
+                "file": "00002.m2ts",
+                "action": "reencode",
+                "duration": 120.0,
+                "video": {"codec_name": "h264", "width": 1920, "height": 1080, "fps": 23.976, "source_video_bitrate": 20_000_000, "target_hevc": {}},
+            },
+        ]
+        bd.remember_original_clip_actions(clips)
+        args = argparse.Namespace(
+            quality="copy",
+            main_title_quality=None,
+            main_title_cq=None,
+            main_title_bitrate_mode=None,
+            top_n_quality=[1, "cq:18"],
+            top_n_cq=None,
+            top_n_bitrate_mode=None,
+            clip_quality=None,
+            clip_bitrate_mode=None,
+            clip_cq=None,
+            copy_clips=None,
+        )
+
+        report = bd.apply_quality_overrides(clips, {"mode": "balanced"}, args)
+
+        self.assertEqual(report["general"]["matched_count"], 2)
+        self.assertEqual(report["top_n_quality"]["matched_count"], 1)
+        self.assertEqual(clips[0]["action"], "reencode")
+        self.assertEqual(clips[0]["video"]["target_hevc"]["cq"], 18)
+        self.assertEqual(clips[1]["action"], "copy")
+
+    def test_clip_quality_copy_uses_same_quality_system(self) -> None:
+        clips = [{"file": "00001.m2ts", "action": "reencode", "duration": 30.0, "video": {"target_hevc": {}}}]
+        bd.remember_original_clip_actions(clips)
+
+        report = bd.apply_named_clip_quality_overrides(clips, {"mode": "balanced"}, clip_quality=[["00001", "copy"]])
+
+        self.assertEqual(report["matched_count"], 1)
+        self.assertEqual(clips[0]["action"], "copy")
+        self.assertEqual(report["clips"][0]["quality"], "copy")
+
+    def test_qsv_rejects_cq_quality_overrides(self) -> None:
+        args = argparse.Namespace(
+            encoder="hevc_qsv",
+            bitrate_preset_file=None,
+            bitrate_mode="balanced",
+            hevc_bitrate_factor=None,
+            quality=None,
+            main_title_quality=None,
+            main_title_cq=None,
+            main_title_bitrate_mode=None,
+            top_n_quality=[3, "cq:18"],
+            top_n_cq=None,
+            top_n_bitrate_mode=None,
+            clip_quality=None,
+            clip_bitrate_mode=None,
+            clip_cq=None,
+        )
+
+        with self.assertRaisesRegex(bd.ToolError, "compact-cq.*hevc_qsv"):
+            bd.validate_encoder_bitrate_compatibility(args)
+
+    def test_clip_overrides_reject_unknown_clip(self) -> None:
+        with self.assertRaisesRegex(bd.ToolError, "unknown clip"):
+            bd.apply_clip_copy_overrides([{"file": "00001.m2ts", "action": "reencode"}], [["00002"]])
 
     def test_top_n_cq_rejects_main_title_cq_combination(self) -> None:
         args = argparse.Namespace(main_title_cq=18, top_n_cq=[3, 18])
@@ -576,6 +742,65 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("--top-n-cq", cmd)
         index = cmd.index("--top-n-cq")
         self.assertEqual(cmd[index + 1 : index + 3], ["3", "18"])
+
+    def test_background_command_carries_quality_and_copy_exceptions(self) -> None:
+        args = argparse.Namespace(
+            source="Disc",
+            fast_bitrate=False,
+            force_encode=False,
+            force=False,
+            makemkv=False,
+            no_makemkv=False,
+            require_makemkv=False,
+            no_patch_navigation=False,
+            no_bdj_compatibility_patches=False,
+            no_encode_ahead=False,
+            verbose=False,
+            hevc_bit_depth=8,
+            encoder="hevc_nvenc",
+            encode_ahead_depth=3,
+            bitrate_preset_file=None,
+            quality=None,
+            bitrate_mode="balanced",
+            hevc_bitrate_factor=None,
+            min_video_bitrate=2_000_000,
+            max_video_bitrate=80_000_000,
+            maxrate_multiplier=1.55,
+            bufsize_multiplier=2.0,
+            compact_cq_value=config.ANIME_CQ_VALUE,
+            anime_cq_min_duration=config.DEFAULT_ANIME_CQ_MIN_DURATION,
+            main_title_quality="transparent",
+            main_title_bitrate_mode=None,
+            main_title_cq=None,
+            top_n_quality=None,
+            top_n_bitrate_mode=None,
+            top_n_cq=None,
+            clip_quality=[["00012", "smaller"]],
+            clip_bitrate_mode=None,
+            clip_cq=[["00013", "20"]],
+            copy_clips=[["00014", "00015.m2ts"]],
+            audio_mode=config.DEFAULT_AUDIO_MODE,
+            stereo_audio_bitrate=256_000,
+            mono_audio_bitrate=128_000,
+            vlc_compat=bd.DEFAULT_VLC_COMPATIBILITY_MODE,
+            vlc_fix=[],
+            compat_patch_file=[],
+            decode_sample=30.0,
+        )
+
+        cmd = bd.auto_command_for_job(args, Path("out"), Path("report.json"))
+
+        self.assertIn("--main-title-quality", cmd)
+        self.assertIn("transparent", cmd)
+        self.assertIn("--clip-quality", cmd)
+        clip_mode_index = cmd.index("--clip-quality")
+        self.assertEqual(cmd[clip_mode_index + 1 : clip_mode_index + 3], ["00012", "smaller"])
+        self.assertIn("--clip-cq", cmd)
+        clip_cq_index = cmd.index("--clip-cq")
+        self.assertEqual(cmd[clip_cq_index + 1 : clip_cq_index + 3], ["00013", "20"])
+        self.assertIn("--copy-clips", cmd)
+        copy_index = cmd.index("--copy-clips")
+        self.assertEqual(cmd[copy_index + 1 : copy_index + 3], ["00014", "00015.m2ts"])
 
     def test_compact_audio_pipeline_runs_audio_before_mux_per_clip(self) -> None:
         args = argparse.Namespace(encode_ahead_depth=2, audio_mode="compact-stereo")

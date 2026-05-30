@@ -121,6 +121,7 @@ from .scan import (
     inspect_clip,
     run_makemkv_scan,
     scan_disc,
+    summarize_disc,
     title_summary,
 )
 from .tools import (
@@ -159,101 +160,660 @@ def mono_audio_bitrate_from_args(args: argparse.Namespace) -> int:
     return int(getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE) or DEFAULT_MONO_AUDIO_BITRATE)
 
 
-def cq_override_candidates(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    candidates = [
-        clip
-        for clip in clips
-        if clip.get("action") == "reencode"
-        and (((clip.get("video") or {}).get("target_hevc") or {}).get("rate_control") == "cq")
-    ]
+def flatten_clip_values(values: Any) -> list[str]:
+    flattened: list[str] = []
+    for value in values or []:
+        if isinstance(value, (list, tuple)):
+            flattened.extend(str(item) for item in value)
+        else:
+            flattened.append(str(value))
+    return flattened
+
+
+def flatten_clip_pairs(values: Any) -> list[tuple[str, Any]]:
+    flattened: list[tuple[str, Any]] = []
+    for value in values or []:
+        if isinstance(value, (list, tuple)) and len(value) == 2 and not isinstance(value[0], (list, tuple)):
+            flattened.append((str(value[0]), value[1]))
+        else:
+            raise ToolError("Clip quality overrides must be CLIP VALUE pairs")
+    return flattened
+
+
+def normalize_clip_name(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ToolError("Clip id cannot be empty")
+    name = Path(text.replace("\\", "/")).name
+    path = Path(name)
+    suffix = path.suffix.lower()
+    if suffix and suffix != ".m2ts":
+        raise ToolError(f"Clip id must be an M2TS clip id or filename, not {value!r}")
+    return name if suffix else f"{name}.m2ts"
+
+
+def normalize_clip_names(values: Any) -> list[str]:
+    return [normalize_clip_name(value) for value in flatten_clip_values(values)]
+
+
+def clip_lookup_by_name(clips: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for clip in clips:
+        if clip.get("file"):
+            lookup[normalize_clip_name(clip["file"])] = clip
+    return lookup
+
+
+def require_named_clips(clips: list[dict[str, Any]], names: list[str], *, option: str) -> list[dict[str, Any]]:
+    lookup = clip_lookup_by_name(clips)
+    missing = sorted({name for name in names if name not in lookup})
+    if missing:
+        raise ToolError(f"{option} referenced unknown clip(s): {', '.join(missing)}")
+    return [lookup[name] for name in names]
+
+
+COPY_QUALITY_ALIASES = {"copy", "source", "passthrough", "no-reencode", "no-reencoding", "none"}
+
+
+def original_clip_action(clip: dict[str, Any]) -> str | None:
+    return clip.get("original_action") or clip.get("action")
+
+
+def remember_original_clip_actions(clips: list[dict[str, Any]]) -> None:
+    for clip in clips:
+        clip.setdefault("original_action", clip.get("action"))
+
+
+def clip_is_reencode_eligible(clip: dict[str, Any]) -> bool:
+    return original_clip_action(clip) == "reencode"
+
+
+def reencode_quality_candidates(clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates = [clip for clip in clips if clip_is_reencode_eligible(clip)]
     return sorted(candidates, key=lambda item: float(item.get("duration") or 0), reverse=True)
 
 
-def validate_cq_override_args(args: argparse.Namespace) -> None:
-    if getattr(args, "main_title_cq", None) is not None and getattr(args, "top_n_cq", None):
-        raise ToolError("--top-n-cq cannot be used with --main-title-cq")
-    top_n_cq = getattr(args, "top_n_cq", None)
-    if top_n_cq is None:
-        return
-    count, cq_value = [int(value) for value in top_n_cq]
-    if count < 1:
-        raise ToolError("--top-n-cq COUNT must be at least 1")
+def validate_bitrate_mode_value(value: Any, *, option: str) -> str:
+    mode = normalize_bitrate_mode(str(value or "").strip())
+    if mode not in BITRATE_MODES:
+        allowed = ", ".join(BITRATE_MODES)
+        raise ToolError(f"{option} must be one of: {allowed}")
+    return mode
+
+
+def validate_cq_value(value: Any, *, option: str) -> int:
+    try:
+        cq_value = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"{option} must be an integer between 0 and 51") from exc
     if cq_value < 0 or cq_value > 51:
-        raise ToolError("--top-n-cq CQ must be between 0 and 51")
+        raise ToolError(f"{option} must be between 0 and 51")
+    return cq_value
+
+
+def parse_quality_spec(value: Any, *, option: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        raise ToolError(f"{option} cannot be empty")
+    if text in COPY_QUALITY_ALIASES:
+        return {"action": "copy", "quality": "copy"}
+    cq_match = re.fullmatch(r"(?:compact-cq|cq)[:= -]?(\d{1,2})", text) or re.fullmatch(r"cq(\d{1,2})", text)
+    if cq_match:
+        cq_value = validate_cq_value(cq_match.group(1), option=option)
+        return {"action": "reencode", "quality": f"cq:{cq_value}", "mode": ANIME_CQ_PRESET, "cq": cq_value}
+    mode = validate_bitrate_mode_value(text, option=option)
+    return {"action": "reencode", "quality": mode, "mode": mode}
+
+
+def quality_spec_bitrate_options(base_options: dict[str, Any] | None, spec: dict[str, Any]) -> dict[str, Any]:
+    if spec.get("action") == "copy":
+        return copy.deepcopy(base_options or {})
+    return override_bitrate_options(base_options, mode=spec.get("mode"), cq_value=spec.get("cq"))
+
+
+def quality_spec_uses_cq(spec: dict[str, Any] | None) -> bool:
+    if not spec or spec.get("action") == "copy":
+        return False
+    return spec.get("cq") is not None or normalize_bitrate_mode(str(spec.get("mode") or "")) == ANIME_CQ_PRESET
+
+
+def args_request_cq_quality(args: argparse.Namespace, *, general_options: dict[str, Any]) -> bool:
+    if normalize_bitrate_mode(str(general_options.get("mode") or "balanced")) == ANIME_CQ_PRESET:
+        return True
+    if quality_spec_uses_cq(parse_quality_spec(getattr(args, "quality", None), option="--quality")):
+        return True
+    if quality_spec_uses_cq(parse_quality_spec(getattr(args, "main_title_quality", None), option="--main-title-quality")):
+        return True
+    if getattr(args, "main_title_cq", None) is not None:
+        return True
+    if getattr(args, "main_title_bitrate_mode", None) and normalize_bitrate_mode(str(args.main_title_bitrate_mode)) == ANIME_CQ_PRESET:
+        return True
+    top_n_quality = parse_top_n_quality(getattr(args, "top_n_quality", None), option="--top-n-quality")
+    if top_n_quality and quality_spec_uses_cq(top_n_quality[1]):
+        return True
+    if getattr(args, "top_n_cq", None):
+        return True
+    top_n_mode = parse_top_n_mode(getattr(args, "top_n_bitrate_mode", None), option="--top-n-bitrate-mode")
+    if top_n_mode and normalize_bitrate_mode(top_n_mode[1]) == ANIME_CQ_PRESET:
+        return True
+    for _, quality in flatten_clip_pairs(getattr(args, "clip_quality", None)):
+        if quality_spec_uses_cq(parse_quality_spec(quality, option="--clip-quality QUALITY")):
+            return True
+    if getattr(args, "clip_cq", None):
+        return True
+    for _, mode in flatten_clip_pairs(getattr(args, "clip_bitrate_mode", None)):
+        if normalize_bitrate_mode(str(mode)) == ANIME_CQ_PRESET:
+            return True
+    return False
+
+
+def bitrate_options_for_args(args: argparse.Namespace) -> dict[str, Any]:
+    options = bitrate_options_from_args(args)
+    spec = parse_quality_spec(getattr(args, "quality", None), option="--quality")
+    if spec and spec.get("action") == "reencode":
+        return quality_spec_bitrate_options(options, spec)
+    return options
+
+
+def parse_top_n_mode(value: Any, *, option: str) -> tuple[int, str] | None:
+    if not value:
+        return None
+    if len(value) != 2:
+        raise ToolError(f"{option} requires COUNT and MODE")
+    try:
+        count = int(value[0])
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"{option} COUNT must be an integer") from exc
+    if count < 1:
+        raise ToolError(f"{option} COUNT must be at least 1")
+    mode = validate_bitrate_mode_value(value[1], option=f"{option} MODE")
+    return count, mode
+
+
+def parse_top_n_quality(value: Any, *, option: str) -> tuple[int, dict[str, Any]] | None:
+    if not value:
+        return None
+    if len(value) != 2:
+        raise ToolError(f"{option} requires COUNT and QUALITY")
+    try:
+        count = int(value[0])
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"{option} COUNT must be an integer") from exc
+    if count < 1:
+        raise ToolError(f"{option} COUNT must be at least 1")
+    spec = parse_quality_spec(value[1], option=f"{option} QUALITY")
+    if spec is None:
+        raise ToolError(f"{option} QUALITY cannot be empty")
+    return count, spec
+
+
+def parse_top_n_cq(value: Any, *, option: str = "--top-n-cq") -> tuple[int, int] | None:
+    if not value:
+        return None
+    if len(value) != 2:
+        raise ToolError(f"{option} requires COUNT and CQ")
+    try:
+        count = int(value[0])
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"{option} COUNT must be an integer") from exc
+    if count < 1:
+        raise ToolError(f"{option} COUNT must be at least 1")
+    return count, validate_cq_value(value[1], option=f"{option} CQ")
+
+
+def override_bitrate_options(
+    base_options: dict[str, Any] | None,
+    *,
+    mode: str | None = None,
+    cq_value: int | None = None,
+) -> dict[str, Any]:
+    options = copy.deepcopy(base_options or {})
+    if mode is not None:
+        options["mode"] = validate_bitrate_mode_value(mode, option="bitrate override mode")
+    if cq_value is not None:
+        options["mode"] = ANIME_CQ_PRESET
+        options["compact_cq_value"] = validate_cq_value(cq_value, option="CQ override")
+    if cq_value is not None:
+        current_min = safe_float(options.get("anime_cq_min_duration")) or DEFAULT_ANIME_CQ_MIN_DURATION
+        options["anime_cq_min_duration"] = min(current_min, SECONDS_REENCODE_THRESHOLD)
+    return options
+
+
+def summarize_target(target: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": target.get("mode"),
+        "rate_control": target.get("rate_control"),
+        "cq": target.get("cq"),
+        "target_mbps": target.get("target_mbps"),
+        "maxrate_mbps": target.get("maxrate_mbps"),
+        "bufsize_mbps": target.get("bufsize_mbps"),
+    }
+
+
+def retarget_clip(
+    clip: dict[str, Any],
+    bitrate_options: dict[str, Any],
+    *,
+    override_kind: str,
+    override_label: str,
+) -> dict[str, Any]:
+    video = clip.setdefault("video", {})
+    previous = copy.deepcopy(video.get("target_hevc") or {})
+    target = equivalent_hevc_bitrate(
+        video_bps=safe_int(video.get("source_video_bitrate")) or safe_int(video.get("bit_rate")),
+        width=safe_int(video.get("width")),
+        height=safe_int(video.get("height")),
+        fps=safe_float(video.get("fps")) or parse_rate(video.get("avg_frame_rate")) or parse_rate(video.get("r_frame_rate")),
+        duration_seconds=safe_float(clip.get("duration")),
+        source_codec=video.get("codec_name"),
+        **bitrate_options,
+    )
+    target[f"{override_kind}_override"] = True
+    reason = target.get("reason")
+    target["reason"] = f"{reason}; {override_label}" if reason else override_label
+    video["target_hevc"] = target
+    clip["action"] = "reencode"
+    return {
+        "file": clip.get("file"),
+        "duration": clip.get("duration"),
+        "action": clip.get("action"),
+        "previous": summarize_target(previous),
+        "target": summarize_target(target),
+    }
+
+
+def copy_clip_for_quality_override(clip: dict[str, Any], *, override_kind: str, override_label: str) -> dict[str, Any]:
+    previous_action = clip.get("action")
+    clip["action"] = "copy"
+    clip[f"{override_kind}_override"] = True
+    clip["copy_override_reason"] = override_label
+    return {
+        "file": clip.get("file"),
+        "duration": clip.get("duration"),
+        "previous_action": previous_action,
+        "action": clip.get("action"),
+        "quality": "copy",
+    }
+
+
+def apply_quality_spec_to_clip(
+    clip: dict[str, Any],
+    spec: dict[str, Any],
+    bitrate_options: dict[str, Any],
+    *,
+    override_kind: str,
+    override_label: str,
+) -> dict[str, Any]:
+    if spec.get("action") == "copy":
+        return copy_clip_for_quality_override(clip, override_kind=override_kind, override_label=override_label)
+    options = quality_spec_bitrate_options(bitrate_options, spec)
+    report = retarget_clip(clip, options, override_kind=override_kind, override_label=override_label)
+    report["quality"] = spec.get("quality")
+    return report
+
+
+def validate_cq_override_args(args: argparse.Namespace) -> None:
+    parse_quality_spec(getattr(args, "quality", None), option="--quality")
+    main_title_cq = getattr(args, "main_title_cq", None)
+    top_n_cq = getattr(args, "top_n_cq", None)
+    main_title_mode = getattr(args, "main_title_bitrate_mode", None)
+    top_n_mode = getattr(args, "top_n_bitrate_mode", None)
+    main_title_quality = getattr(args, "main_title_quality", None)
+    top_n_quality = getattr(args, "top_n_quality", None)
+    main_requested = main_title_quality is not None or main_title_cq is not None or main_title_mode is not None
+    top_requested = bool(top_n_quality) or bool(top_n_cq) or bool(top_n_mode)
+    if main_requested and top_requested:
+        raise ToolError("Main-title quality overrides cannot be used with top-N quality overrides")
+    main_count = sum(1 for value in (main_title_quality, main_title_cq, main_title_mode) if value is not None)
+    if main_count > 1:
+        raise ToolError("Use only one main-title quality override")
+    top_count = sum(1 for value in (top_n_quality, top_n_cq, top_n_mode) if bool(value))
+    if top_count > 1:
+        raise ToolError("Use only one top-N quality override")
+    if main_title_quality is not None:
+        parse_quality_spec(main_title_quality, option="--main-title-quality")
+    if main_title_cq is not None:
+        validate_cq_value(main_title_cq, option="--main-title-cq")
+    if main_title_mode is not None:
+        validate_bitrate_mode_value(main_title_mode, option="--main-title-bitrate-mode")
+    if top_n_quality:
+        parse_top_n_quality(top_n_quality, option="--top-n-quality")
+    parse_top_n_cq(top_n_cq, option="--top-n-cq")
+    parse_top_n_mode(top_n_mode, option="--top-n-bitrate-mode")
+
+    clip_modes = flatten_clip_pairs(getattr(args, "clip_bitrate_mode", None))
+    clip_cqs = flatten_clip_pairs(getattr(args, "clip_cq", None))
+    clip_qualities = flatten_clip_pairs(getattr(args, "clip_quality", None))
+    for _, mode in clip_modes:
+        validate_bitrate_mode_value(mode, option="--clip-bitrate-mode MODE")
+    for _, cq_value in clip_cqs:
+        validate_cq_value(cq_value, option="--clip-cq CQ")
+    for _, quality in clip_qualities:
+        parse_quality_spec(quality, option="--clip-quality QUALITY")
+    mode_names = {normalize_clip_name(clip) for clip, _ in clip_modes}
+    cq_names = {normalize_clip_name(clip) for clip, _ in clip_cqs}
+    quality_names = {normalize_clip_name(clip) for clip, _ in clip_qualities}
+    copy_names = set(normalize_clip_names(getattr(args, "copy_clips", None)))
+    duplicate_quality = sorted((mode_names & cq_names) | (mode_names & quality_names) | (cq_names & quality_names))
+    if duplicate_quality:
+        raise ToolError(f"Use only one quality override per clip: {', '.join(duplicate_quality)}")
+    overridden_and_copied = sorted((mode_names | cq_names | quality_names) & copy_names)
+    if overridden_and_copied:
+        raise ToolError(f"Do not give both a quality override and --copy-clips for: {', '.join(overridden_and_copied)}")
 
 
 def validate_encoder_bitrate_compatibility(args: argparse.Namespace) -> None:
     encoder = selected_hevc_encoder(args)
-    options = bitrate_options_from_args(args)
+    options = bitrate_options_for_args(args)
     mode = normalize_bitrate_mode(str(options.get("mode") or "balanced"))
-    if encoder == "hevc_qsv" and mode == ANIME_CQ_PRESET and not options.get("factor_override"):
+    if encoder == "hevc_qsv" and args_request_cq_quality(args, general_options=options) and not options.get("factor_override"):
         raise ToolError(
             "compact-cq uses CQ rate control, but BD2HEVC does not currently support compact-cq with --encoder hevc_qsv.\n"
             "Use a CQ-capable encoder instead, for example:\n"
-            "  python bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo --encoder libx265\n"
+            "  python bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\" --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo --encoder libx265\n"
             "Or keep Intel QSV and choose a bitrate mode instead, for example:\n"
             "  python bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\" --bitrate-mode balanced --encoder hevc_qsv"
         )
 
 
-def apply_main_title_cq_override(clips: list[dict[str, Any]], cq_value: int | None) -> dict[str, Any] | None:
-    if cq_value is None:
+def apply_general_quality_override(
+    clips: list[dict[str, Any]],
+    quality: Any,
+    bitrate_options: dict[str, Any],
+) -> dict[str, Any] | None:
+    spec = parse_quality_spec(quality, option="--quality")
+    if spec is None:
         return None
-    if cq_value < 0 or cq_value > 51:
-        raise ToolError("--main-title-cq must be between 0 and 51")
-    candidates = cq_override_candidates(clips)
-    main_clip = max(candidates, key=lambda item: float(item.get("duration") or 0), default=None)
+    selected = reencode_quality_candidates(clips)
+    if spec.get("action") == "copy":
+        reports = [
+            copy_clip_for_quality_override(clip, override_kind="general_quality", override_label="general quality override to copy")
+            for clip in selected
+        ]
+    else:
+        reports = [
+            retarget_clip(
+                clip,
+                quality_spec_bitrate_options(bitrate_options, spec),
+                override_kind="general_quality",
+                override_label=f"general quality override to {spec.get('quality')}",
+            )
+            for clip in selected
+        ]
+    return {"quality": spec.get("quality"), "clips": reports, "matched_count": len(reports)}
+
+
+def apply_main_title_quality_override(
+    clips: list[dict[str, Any]],
+    quality: Any,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    spec = parse_quality_spec(quality, option="--main-title-quality")
+    if spec is None:
+        return None
+    candidates = reencode_quality_candidates(clips)
+    main_clip = candidates[0] if candidates else None
     if not main_clip:
         return None
-    target = ((main_clip.get("video") or {}).get("target_hevc") or {})
-    previous = safe_int(target.get("cq"))
-    target["cq"] = cq_value
-    target["compact_cq_value"] = cq_value
-    target["main_title_cq_override"] = True
-    reason = target.get("reason")
-    target["reason"] = f"{reason}; main title CQ override {previous} -> {cq_value}" if reason else f"main title CQ override {previous} -> {cq_value}"
+    report = apply_quality_spec_to_clip(
+        main_clip,
+        spec,
+        bitrate_options or {},
+        override_kind="main_title_quality",
+        override_label=f"main title quality override to {spec.get('quality')}",
+    )
+    return report
+
+
+def apply_main_title_bitrate_mode_override(
+    clips: list[dict[str, Any]],
+    mode: str | None,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if mode is None:
+        return None
+    candidates = reencode_quality_candidates(clips)
+    main_clip = candidates[0] if candidates else None
+    if not main_clip:
+        return None
+    options = override_bitrate_options(bitrate_options, mode=mode)
+    report = retarget_clip(
+        main_clip,
+        options,
+        override_kind="main_title_quality",
+        override_label=f"main title bitrate mode override to {normalize_bitrate_mode(mode)}",
+    )
+    report["mode"] = normalize_bitrate_mode(mode)
+    return report
+
+
+def apply_main_title_cq_override(
+    clips: list[dict[str, Any]],
+    cq_value: int | None,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if cq_value is None:
+        return None
+    cq_value = validate_cq_value(cq_value, option="--main-title-cq")
+    candidates = reencode_quality_candidates(clips)
+    main_clip = candidates[0] if candidates else None
+    if not main_clip:
+        return None
+    options = override_bitrate_options(bitrate_options, cq_value=cq_value)
+    report = retarget_clip(main_clip, options, override_kind="main_title_cq", override_label=f"main title CQ override to {cq_value}")
+    report["cq"] = cq_value
+    report["previous_cq"] = report["previous"].get("cq")
+    return report
+
+
+def apply_top_n_bitrate_mode_override(
+    clips: list[dict[str, Any]],
+    top_n_mode: list[Any] | tuple[Any, Any] | None,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    parsed = parse_top_n_mode(top_n_mode, option="--top-n-bitrate-mode")
+    if parsed is None:
+        return None
+    count, mode = parsed
+    selected = reencode_quality_candidates(clips)[:count]
+    if not selected:
+        return None
+    options = override_bitrate_options(bitrate_options, mode=mode)
+    report_clips = [
+        retarget_clip(clip, options, override_kind="top_n_quality", override_label=f"top {count} bitrate mode override to {mode}")
+        for clip in selected
+    ]
     return {
-        "file": main_clip.get("file"),
-        "duration": main_clip.get("duration"),
-        "previous_cq": previous,
-        "cq": cq_value,
+        "count": count,
+        "mode": mode,
+        "clips": report_clips,
+        "matched_count": len(report_clips),
     }
 
 
-def apply_top_n_cq_override(clips: list[dict[str, Any]], top_n_cq: list[int] | tuple[int, int] | None) -> dict[str, Any] | None:
-    if not top_n_cq:
+def apply_top_n_quality_override(
+    clips: list[dict[str, Any]],
+    top_n_quality: list[Any] | tuple[Any, Any] | None,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    parsed = parse_top_n_quality(top_n_quality, option="--top-n-quality")
+    if parsed is None:
         return None
-    count, cq_value = [int(value) for value in top_n_cq]
-    if count < 1:
-        raise ToolError("--top-n-cq COUNT must be at least 1")
-    if cq_value < 0 or cq_value > 51:
-        raise ToolError("--top-n-cq CQ must be between 0 and 51")
-    selected = cq_override_candidates(clips)[:count]
+    count, spec = parsed
+    selected = reencode_quality_candidates(clips)[:count]
     if not selected:
         return None
-    report_clips: list[dict[str, Any]] = []
-    for clip in selected:
-        target = ((clip.get("video") or {}).get("target_hevc") or {})
-        previous = safe_int(target.get("cq"))
-        target["cq"] = cq_value
-        target["compact_cq_value"] = cq_value
-        target["top_n_cq_override"] = True
-        reason = target.get("reason")
-        target["reason"] = f"{reason}; top {count} CQ override {previous} -> {cq_value}" if reason else f"top {count} CQ override {previous} -> {cq_value}"
-        report_clips.append(
-            {
-                "file": clip.get("file"),
-                "duration": clip.get("duration"),
-                "previous_cq": previous,
-                "cq": cq_value,
-            }
+    reports = [
+        apply_quality_spec_to_clip(
+            clip,
+            spec,
+            bitrate_options or {},
+            override_kind="top_n_quality",
+            override_label=f"top {count} quality override to {spec.get('quality')}",
         )
+        for clip in selected
+    ]
+    return {"count": count, "quality": spec.get("quality"), "clips": reports, "matched_count": len(reports)}
+
+
+def apply_top_n_cq_override(clips: list[dict[str, Any]], top_n_cq: list[int] | tuple[int, int] | None) -> dict[str, Any] | None:
+    return apply_top_n_cq_override_with_options(clips, top_n_cq, None)
+
+
+def apply_top_n_cq_override_with_options(
+    clips: list[dict[str, Any]],
+    top_n_cq: list[int] | tuple[int, int] | None,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    parsed = parse_top_n_cq(top_n_cq, option="--top-n-cq")
+    if parsed is None:
+        return None
+    count, cq_value = parsed
+    selected = reencode_quality_candidates(clips)[:count]
+    if not selected:
+        return None
+    options = override_bitrate_options(bitrate_options, cq_value=cq_value)
+    report_clips = []
+    for clip in selected:
+        report = retarget_clip(clip, options, override_kind="top_n_cq", override_label=f"top {count} CQ override to {cq_value}")
+        report["previous_cq"] = report["previous"].get("cq")
+        report["cq"] = cq_value
+        report_clips.append(report)
     return {
         "count": count,
         "cq": cq_value,
         "clips": report_clips,
         "matched_count": len(report_clips),
     }
+
+
+def apply_named_clip_quality_overrides(
+    clips: list[dict[str, Any]],
+    bitrate_options: dict[str, Any],
+    *,
+    clip_quality: Any = None,
+    clip_bitrate_mode: Any = None,
+    clip_cq: Any = None,
+) -> dict[str, Any] | None:
+    clip_qualities = flatten_clip_pairs(clip_quality)
+    clip_modes = flatten_clip_pairs(clip_bitrate_mode)
+    clip_cqs = flatten_clip_pairs(clip_cq)
+    if not clip_qualities and not clip_modes and not clip_cqs:
+        return None
+    reports: list[dict[str, Any]] = []
+    all_names = [normalize_clip_name(clip) for clip, _ in clip_qualities + clip_modes + clip_cqs]
+    require_named_clips(clips, all_names, option="clip quality override")
+    lookup = clip_lookup_by_name(clips)
+    for clip_name, quality_value in clip_qualities:
+        name = normalize_clip_name(clip_name)
+        clip = lookup[name]
+        if not clip_is_reencode_eligible(clip):
+            raise ToolError(f"--clip-quality {name} has no effect because that clip action is {clip.get('action')}")
+        spec = parse_quality_spec(quality_value, option="--clip-quality QUALITY")
+        if spec is None:
+            raise ToolError("--clip-quality QUALITY cannot be empty")
+        report = apply_quality_spec_to_clip(
+            clip,
+            spec,
+            bitrate_options,
+            override_kind="clip_quality",
+            override_label=f"clip quality override to {spec.get('quality')}",
+        )
+        report["selector"] = name
+        reports.append(report)
+    for clip_name, mode_value in clip_modes:
+        name = normalize_clip_name(clip_name)
+        clip = lookup[name]
+        if not clip_is_reencode_eligible(clip):
+            raise ToolError(f"--clip-bitrate-mode {name} has no effect because that clip action is {clip.get('action')}")
+        mode = validate_bitrate_mode_value(mode_value, option="--clip-bitrate-mode MODE")
+        options = override_bitrate_options(bitrate_options, mode=mode)
+        report = retarget_clip(clip, options, override_kind="clip_quality", override_label=f"clip bitrate mode override to {mode}")
+        report["selector"] = name
+        report["mode"] = mode
+        reports.append(report)
+    for clip_name, cq_value_raw in clip_cqs:
+        name = normalize_clip_name(clip_name)
+        clip = lookup[name]
+        if not clip_is_reencode_eligible(clip):
+            raise ToolError(f"--clip-cq {name} has no effect because that clip action is {clip.get('action')}")
+        cq_value = validate_cq_value(cq_value_raw, option="--clip-cq CQ")
+        options = override_bitrate_options(bitrate_options, cq_value=cq_value)
+        report = retarget_clip(clip, options, override_kind="clip_cq", override_label=f"clip CQ override to {cq_value}")
+        report["selector"] = name
+        report["previous_cq"] = report["previous"].get("cq")
+        report["cq"] = cq_value
+        reports.append(report)
+    return {"clips": reports, "matched_count": len(reports)}
+
+
+def apply_clip_copy_overrides(clips: list[dict[str, Any]], requested: Any) -> dict[str, Any] | None:
+    names = normalize_clip_names(requested)
+    if not names:
+        return None
+    selected = require_named_clips(clips, names, option="--copy-clips")
+    report_clips: list[dict[str, Any]] = []
+    for name, clip in zip(names, selected):
+        previous_action = clip.get("action")
+        if previous_action == "reencode":
+            clip["action"] = "copy"
+            clip["copy_override"] = True
+            clip["copy_override_reason"] = "requested by --copy-clips/--exclude-clips"
+        report_clips.append(
+            {
+                "file": clip.get("file") or name,
+                "duration": clip.get("duration"),
+                "previous_action": previous_action,
+                "action": clip.get("action"),
+            }
+        )
+    return {"requested": names, "clips": report_clips, "matched_count": len(report_clips)}
+
+
+def apply_quality_overrides(
+    clips: list[dict[str, Any]],
+    bitrate_options: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any] | None:
+    general_quality_override = apply_general_quality_override(clips, getattr(args, "quality", None), bitrate_options)
+    main_title_quality_override = None
+    main_title_cq_override = None
+    main_title_mode_override = None
+    top_n_quality_override = None
+    top_n_cq_override = None
+    top_n_mode_override = None
+    if getattr(args, "main_title_quality", None) is not None:
+        main_title_quality_override = apply_main_title_quality_override(clips, getattr(args, "main_title_quality", None), bitrate_options)
+    elif getattr(args, "main_title_cq", None) is not None:
+        main_title_cq_override = apply_main_title_cq_override(clips, getattr(args, "main_title_cq", None), bitrate_options)
+    elif getattr(args, "main_title_bitrate_mode", None) is not None:
+        main_title_mode_override = apply_main_title_bitrate_mode_override(clips, getattr(args, "main_title_bitrate_mode", None), bitrate_options)
+    if getattr(args, "top_n_quality", None):
+        top_n_quality_override = apply_top_n_quality_override(clips, getattr(args, "top_n_quality", None), bitrate_options)
+    elif getattr(args, "top_n_cq", None):
+        top_n_cq_override = apply_top_n_cq_override_with_options(clips, getattr(args, "top_n_cq", None), bitrate_options)
+    elif getattr(args, "top_n_bitrate_mode", None):
+        top_n_mode_override = apply_top_n_bitrate_mode_override(clips, getattr(args, "top_n_bitrate_mode", None), bitrate_options)
+    named_clip_overrides = apply_named_clip_quality_overrides(
+        clips,
+        bitrate_options,
+        clip_quality=getattr(args, "clip_quality", None),
+        clip_bitrate_mode=getattr(args, "clip_bitrate_mode", None),
+        clip_cq=getattr(args, "clip_cq", None),
+    )
+    report = {
+        "general": general_quality_override,
+        "main_title_quality": main_title_quality_override,
+        "main_title_cq": main_title_cq_override,
+        "main_title_bitrate_mode": main_title_mode_override,
+        "top_n_quality": top_n_quality_override,
+        "top_n_cq": top_n_cq_override,
+        "top_n_bitrate_mode": top_n_mode_override,
+        "named_clips": named_clip_overrides,
+    }
+    return report if any(value is not None for value in report.values()) else None
 
 
 def extract_title_with_makemkv(source: Path, title_id: int, destination: Path, tools: dict[str, Any], *, dry_run: bool, verbose: bool) -> Path:
@@ -297,7 +857,7 @@ def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[
     else:
         transcode_input = source_clip
 
-    bitrate_options = bitrate_options_from_args(args)
+    bitrate_options = bitrate_options_for_args(args)
     clip_info = inspect_clip(transcode_input, tools, accurate_video_bitrate=not args.fast_bitrate and not args.dry_run, bitrate_options=bitrate_options)
     if clip_info.get("action") != "reencode" and not args.force_encode:
         raise ToolError(f"Selected title does not require non-HEVC reencoding: {transcode_input}")
@@ -418,6 +978,8 @@ def clone_streams_plan_payload(
     top_n_cq_override: dict[str, Any] | None,
     clips: list[dict[str, Any]],
     *,
+    quality_overrides: dict[str, Any] | None = None,
+    copy_clip_overrides: dict[str, Any] | None = None,
     planning_pending: bool = False,
 ) -> dict[str, Any]:
     return {
@@ -430,6 +992,8 @@ def clone_streams_plan_payload(
         "bitrate": bitrate_options,
         "main_title_cq_override": main_title_cq_override,
         "top_n_cq_override": top_n_cq_override,
+        "quality_overrides": quality_overrides,
+        "copy_clip_overrides": copy_clip_overrides,
         "audio": {
             "mode": audio_mode_from_args(args),
             "stereo_bitrate": stereo_audio_bitrate_from_args(args),
@@ -730,7 +1294,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     validate_cq_override_args(args)
     source = Path(args.source).resolve()
     output = Path(args.output).resolve() if args.output else default_output_for(source, "clone-streams")
-    bitrate_options = bitrate_options_from_args(args)
+    bitrate_options = bitrate_options_for_args(args)
     if not args.dry_run:
         make_output_available(output, source, force=args.force)
     scan = scan_disc(
@@ -741,8 +1305,11 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         use_makemkv=use_makemkv_from_args(args),
         verbose=args.verbose,
     )
-    main_title_cq_override = apply_main_title_cq_override(scan.get("clips", []), getattr(args, "main_title_cq", None))
-    top_n_cq_override = apply_top_n_cq_override(scan.get("clips", []), getattr(args, "top_n_cq", None))
+    remember_original_clip_actions(scan.get("clips", []))
+    quality_overrides = apply_quality_overrides(scan.get("clips", []), bitrate_options, args)
+    main_title_cq_override = (quality_overrides or {}).get("main_title_cq")
+    top_n_cq_override = (quality_overrides or {}).get("top_n_cq")
+    copy_clip_overrides = apply_clip_copy_overrides(scan.get("clips", []), getattr(args, "copy_clips", None))
     clips = [c for c in scan.get("clips", []) if c.get("action") == "reencode"]
     progress_plan_path = path_or_none(getattr(args, "progress_plan", None))
     plan_payload = clone_streams_plan_payload(
@@ -753,6 +1320,8 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         main_title_cq_override,
         top_n_cq_override,
         clips,
+        quality_overrides=quality_overrides,
+        copy_clip_overrides=copy_clip_overrides,
     )
     if progress_plan_path:
         progress_plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -848,6 +1417,8 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         "bitrate": bitrate_options,
         "main_title_cq_override": main_title_cq_override,
         "top_n_cq_override": top_n_cq_override,
+        "quality_overrides": quality_overrides,
+        "copy_clip_overrides": copy_clip_overrides,
         "audio": {
             "mode": audio_mode_from_args(args),
             "stereo_bitrate": stereo_audio_bitrate_from_args(args),
@@ -919,14 +1490,19 @@ def cmd_scan(args: argparse.Namespace) -> int:
     reports = []
     for root in roots:
         print(f"Scanning {root.name}...", flush=True)
+        bitrate_options = bitrate_options_for_args(args)
         report = scan_disc(
             root,
             tools,
             accurate_video_bitrate=args.accurate_video_bitrate,
-            bitrate_options=bitrate_options_from_args(args),
+            bitrate_options=bitrate_options,
             use_makemkv=use_makemkv_from_args(args),
             verbose=args.verbose,
         )
+        remember_original_clip_actions(report.get("clips", []))
+        report["quality_overrides"] = apply_quality_overrides(report.get("clips", []), bitrate_options, args)
+        report["copy_clip_overrides"] = apply_clip_copy_overrides(report.get("clips", []), getattr(args, "copy_clips", None))
+        report["summary"] = summarize_disc(report)
         reports.append(report)
         out = report_dir / f"{root.name}.scan.json"
         out.write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -938,6 +1514,99 @@ def cmd_scan(args: argparse.Namespace) -> int:
         "summaries": {r["disc"]: r["summary"] for r in reports},
     }
     (report_dir / "index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+    return 0
+
+
+def planned_clip_quality_text(clip: dict[str, Any]) -> str:
+    action = clip.get("action")
+    original_action = original_clip_action(clip)
+    video = clip.get("video") or {}
+    target = video.get("target_hevc") or {}
+    if action == "copy":
+        return "copy" if original_action == "reencode" else str(original_action or "copy")
+    if action == "already_hevc":
+        return "already HEVC"
+    if action != "reencode":
+        return str(action or "")
+    mode = target.get("mode") or "balanced"
+    if target.get("rate_control") == "cq":
+        return f"cq:{target.get('cq')} ({mode})"
+    if target.get("target_mbps") is not None:
+        return f"{target.get('target_mbps')} Mbps ({mode})"
+    return str(mode)
+
+
+def clip_list_rows(clips: list[dict[str, Any]], *, sort: str = "duration") -> list[dict[str, Any]]:
+    if sort == "file":
+        sorted_clips = sorted(clips, key=lambda item: str(item.get("file") or ""))
+    else:
+        sorted_clips = sorted(clips, key=lambda item: float(item.get("duration") or 0), reverse=True)
+    rows: list[dict[str, Any]] = []
+    for clip in sorted_clips:
+        video = clip.get("video") or {}
+        rows.append(
+            {
+                "clip": clip.get("file"),
+                "duration": clip.get("duration"),
+                "duration_text": format_duration(clip.get("duration")),
+                "planned_action": clip.get("action"),
+                "original_action": original_clip_action(clip),
+                "codec": video.get("codec_name"),
+                "source_video_mbps": video.get("source_video_bitrate_mbps"),
+                "planned_quality": planned_clip_quality_text(clip),
+            }
+        )
+    return rows
+
+
+def print_clip_list(rows: list[dict[str, Any]]) -> None:
+    print(f"{'clip':<12} {'duration':>8} {'action':<12} {'codec':<10} {'src Mbps':>8}  quality")
+    print(f"{'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 8}  {'-' * 24}")
+    for row in rows:
+        mbps_text = "" if row.get("source_video_mbps") is None else str(row.get("source_video_mbps"))
+        print(
+            f"{str(row.get('clip') or ''):<12} "
+            f"{str(row.get('duration_text') or ''):>8} "
+            f"{str(row.get('planned_action') or ''):<12} "
+            f"{str(row.get('codec') or ''):<10} "
+            f"{mbps_text:>8}  "
+            f"{row.get('planned_quality') or ''}"
+        )
+
+
+def cmd_clips(args: argparse.Namespace) -> int:
+    validate_cq_override_args(args)
+    tools = discover_tools()
+    roots = find_disc_roots([Path(args.source)])
+    if not roots:
+        raise ToolError(f"No BDMV folder found at {args.source}")
+    source = roots[0]
+    bitrate_options = bitrate_options_for_args(args)
+    report = scan_disc(
+        source,
+        tools,
+        accurate_video_bitrate=args.accurate_video_bitrate,
+        bitrate_options=bitrate_options,
+        use_makemkv=use_makemkv_from_args(args),
+        verbose=args.verbose,
+    )
+    remember_original_clip_actions(report.get("clips", []))
+    quality_overrides = apply_quality_overrides(report.get("clips", []), bitrate_options, args)
+    copy_clip_overrides = apply_clip_copy_overrides(report.get("clips", []), getattr(args, "copy_clips", None))
+    rows = clip_list_rows(report.get("clips", []), sort=args.sort)
+    payload = {
+        "source": str(source),
+        "sort": args.sort,
+        "bitrate": bitrate_options,
+        "quality_overrides": quality_overrides,
+        "copy_clip_overrides": copy_clip_overrides,
+        "clips": rows,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"BD2HEVC clips for {source.name}")
+        print_clip_list(rows)
     return 0
 
 
@@ -1191,7 +1860,7 @@ def cmd_reencode_replacements(args: argparse.Namespace) -> int:
             hevc_bit_depth=args.hevc_bit_depth,
             encoder=selected_hevc_encoder(args),
             decode_sample=args.decode_sample,
-            bitrate_options=bitrate_options_from_args(args),
+            bitrate_options=bitrate_options_for_args(args),
             verbose=args.verbose,
         )
         if output_clpi.exists():
@@ -1274,7 +1943,7 @@ def cmd_repair_output(args: argparse.Namespace) -> int:
             hevc_bit_depth=args.hevc_bit_depth,
             encoder=selected_hevc_encoder(args),
             decode_sample=args.decode_sample,
-            bitrate_options=bitrate_options_from_args(args),
+            bitrate_options=bitrate_options_for_args(args),
             verbose=args.verbose,
         )
         if output_clpi.exists():
@@ -1532,6 +2201,7 @@ def cmd_queue(args: argparse.Namespace) -> int:
 
 
 def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--quality", default=None, help="General video handling for reencode-eligible clips. Accepts a bitrate preset, cq:N, or copy/no-reencode. Overrides --bitrate-mode when set.")
     parser.add_argument("--bitrate-mode", choices=BITRATE_MODES, default="balanced", help="HEVC bitrate preset. balanced is the tested default; smaller saves more space; transparent spends more bitrate; source-ratio uses a fixed multiplier; compact-cq uses configurable CQ for reencoded clips. episode-compact and anime-cq18 are accepted as legacy aliases.")
     parser.add_argument("--bitrate-preset-file", default=None, help="Load bitrate settings from a JSON preset file. Non-default CLI options override preset fields.")
     parser.add_argument("--hevc-bitrate-factor", type=float, default=None, help="Override bitrate mode with a fixed HEVC/source video bitrate multiplier, e.g. 0.62.")
@@ -1541,8 +2211,16 @@ def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bufsize-multiplier", type=float, default=2.0, help="VBV buffer multiplier relative to maxrate.")
     parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for reencoded clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
     parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Defaults to the 10-second reencode threshold. Raise it if only episode/movie-length clips should use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
-    parser.add_argument("--main-title-cq", type=int, default=None, help="Override compact-cq for the longest reencoded clip. Lower is larger/higher quality; useful for CQ20 extras with a CQ18 main movie.")
-    parser.add_argument("--top-n-cq", nargs=2, type=int, metavar=("COUNT", "CQ"), default=None, help="Override compact-cq for the COUNT longest reencoded CQ clips. Mutually exclusive with --main-title-cq; useful for episode discs, e.g. --top-n-cq 3 18.")
+    parser.add_argument("--main-title-quality", metavar="QUALITY", default=None, help="Quality for the longest reencode-eligible clip. Accepts a bitrate preset, cq:N, or copy/no-reencode. Mutually exclusive with top-N overrides.")
+    parser.add_argument("--main-title-bitrate-mode", metavar="MODE", default=None, help="Legacy spelling for --main-title-quality MODE.")
+    parser.add_argument("--main-title-cq", type=int, default=None, help="Use compact-cq at this CQ value for the longest reencoded clip. Lower is larger/higher quality; useful for CQ20 extras with a CQ18 main movie.")
+    parser.add_argument("--top-n-quality", nargs=2, metavar=("COUNT", "QUALITY"), default=None, help="Quality for the COUNT longest reencode-eligible clips. QUALITY accepts a bitrate preset, cq:N, or copy/no-reencode.")
+    parser.add_argument("--top-n-bitrate-mode", nargs=2, metavar=("COUNT", "MODE"), default=None, help="Legacy spelling for --top-n-quality COUNT MODE.")
+    parser.add_argument("--top-n-cq", nargs=2, type=int, metavar=("COUNT", "CQ"), default=None, help="Use compact-cq at this CQ value for the COUNT longest reencoded clips. Mutually exclusive with main-title overrides; useful for episode discs, e.g. --top-n-cq 3 18.")
+    parser.add_argument("--clip-quality", nargs=2, action="append", metavar=("CLIP", "QUALITY"), default=None, help="Quality for one named M2TS clip. QUALITY accepts a bitrate preset, cq:N, or copy/no-reencode. Can be repeated.")
+    parser.add_argument("--clip-bitrate-mode", nargs=2, action="append", metavar=("CLIP", "MODE"), default=None, help="Legacy spelling for --clip-quality CLIP MODE. Can be repeated.")
+    parser.add_argument("--clip-cq", nargs=2, action="append", metavar=("CLIP", "CQ"), default=None, help="Legacy spelling for --clip-quality CLIP cq:CQ. Can be repeated.")
+    parser.add_argument("--copy-clips", "--exclude-clips", dest="copy_clips", nargs="+", action="append", default=None, metavar="CLIP", help="Copy named M2TS clips untouched instead of reencoding them. Accepts 00012 or 00012.m2ts. Can be repeated.")
 
 
 def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: bool = False) -> None:
@@ -1587,6 +2265,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Common commands:\n"
             "  py bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\"\n"
             "  py bd2hevc.py status --watch\n"
+            "  py bd2hevc.py clips \"BD backups\\Movie Disc\"\n"
             "  py bd2hevc.py jobs\n"
             "  py bd2hevc.py diagnose \"Converted UHD-BD\\Movie (BD) (UHD converted)\"\n"
             "\n"
@@ -1619,6 +2298,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--verbose", action="store_true")
     p_scan.set_defaults(func=cmd_scan)
 
+    p_clips = command_parser(sub, "clips", help="List M2TS clip names, durations, and planned quality.", description="List the source clips in a Blu-ray backup so quality overrides can be chosen without reading raw JSON.", examples="""
+  py bd2hevc.py clips "BD backups\\Movie Disc"
+  py bd2hevc.py clips "BD backups\\Episode Disc" --quality cq:20 --top-n-quality 3 cq:18
+  py bd2hevc.py clips "BD backups\\Menu-heavy Disc" --sort file --clip-quality 00012 copy
+""")
+    p_clips.add_argument("source", help="Source BD backup folder.")
+    p_clips.add_argument("--sort", choices=["duration", "file"], default="duration", help="Sort by duration descending or by clip filename.")
+    p_clips.add_argument("--accurate-video-bitrate", action="store_true", help="Sum video packet sizes for bitrate. Slower, but best for exact source Mbps.")
+    add_bitrate_args(p_clips)
+    add_makemkv_args(p_clips)
+    p_clips.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_clips.add_argument("--verbose", action="store_true")
+    p_clips.set_defaults(func=cmd_clips)
+
     p_convert = command_parser(sub, "convert", help="Convert a BD backup.", description="Legacy conversion command. For normal full-disc menu-preserving use, prefer 'auto', 'start', or 'queue'.", examples="""
   py bd2hevc.py convert "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc"
   py bd2hevc.py convert "BD backups\\Movie Disc" --mode clone-streams
@@ -1631,7 +2324,7 @@ def build_parser() -> argparse.ArgumentParser:
   py bd2hevc.py auto "BD backups\\Movie Disc"
   py bd2hevc.py auto "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
   py bd2hevc.py auto "BD backups\\Movie Disc" --encoder libx265
-  py bd2hevc.py auto "BD backups\\Movie Disc" --bitrate-mode compact-cq --compact-cq-value 20 --audio-mode compact-stereo
+  py bd2hevc.py auto "BD backups\\Movie Disc" --quality cq:20 --audio-mode compact-stereo
 """)
     p_auto.add_argument("source", help="Source BD backup folder.")
     p_auto.add_argument("output", nargs="?", default=None, help="Output folder. Defaults to <source>_FULL_DISC_HEVC.")
@@ -1660,7 +2353,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start = command_parser(sub, "start", help="Start a full-disc conversion in the background.", description="Start one background conversion job and return immediately with status commands.", examples="""
   py bd2hevc.py start "BD backups\\Movie Disc" --name Movie_Disc
   py bd2hevc.py start "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py start "BD backups\\Movie Disc" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
+  py bd2hevc.py start "BD backups\\Movie Disc" --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
 """)
     p_start.add_argument("source", help="Source BD backup folder.")
     p_start.add_argument("output", nargs="?", default=None, help="Output folder. Defaults next to the source.")
@@ -1684,9 +2377,9 @@ def build_parser() -> argparse.ArgumentParser:
   py bd2hevc.py queue "BD backups\\Movie Disc" --output-dir "Converted UHD-BD"
   py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
   py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --encoder libx265
-  py bd2hevc.py queue "Disc 1" "Disc 2" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20
-  py bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --main-title-cq 18 --audio-mode compact-stereo
-  py bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --bitrate-mode compact-cq --compact-cq-value 20 --top-n-cq 3 18
+  py bd2hevc.py queue "Disc 1" "Disc 2" --output-dir "Converted UHD-BD" --quality cq:20
+  py bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
+  py bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality cq:20 --top-n-quality 3 cq:18
 """)
     p_queue.add_argument("sources", nargs="+", help="Source BD backup folders or parent folders containing BDMV backups.")
     p_queue.add_argument("--output-dir", default=None, help="Put each converted output in this folder using '<Title> (BD) (UHD converted)' names.")
