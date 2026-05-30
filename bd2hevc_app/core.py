@@ -63,6 +63,7 @@ from .config import (
     SPARSE_TIMING_MIN_RATIO,
     VERSION,
 )
+from .diagnostics import cmd_diagnose
 from .encoding import encode_to_hevc_m2ts, transcode_compact_audio_tracks
 from .muxing import (
     author_m2ts_split,
@@ -1567,6 +1568,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  py bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\"\n"
             "  py bd2hevc.py status --watch\n"
             "  py bd2hevc.py jobs\n"
+            "  py bd2hevc.py diagnose \"Converted UHD-BD\\Movie (BD) (UHD converted)\"\n"
             "\n"
             "Command help:\n"
             "  py bd2hevc.py <command> --help\n"
@@ -1696,8 +1698,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs = command_parser(sub, "jobs", help="List recent background conversions.", description="List running, queued, completed, failed, and canceled background jobs.", examples="""
   py bd2hevc.py jobs
   py bd2hevc.py jobs --limit 30
+  py bd2hevc.py jobs --active
+  py bd2hevc.py jobs --failed --hide-old-failed
 """)
     p_jobs.add_argument("--limit", type=int, default=10)
+    p_jobs.add_argument("--active", action="store_true", help="Show only running, queued, and paused jobs.")
+    p_jobs.add_argument("--failed", action="store_true", help="Show only failed jobs.")
+    p_jobs.add_argument("--completed", action="store_true", help="Show only completed jobs.")
+    p_jobs.add_argument("--canceled", action="store_true", help="Show only canceled jobs.")
+    p_jobs.add_argument("--hide-old-failed", action="store_true", help="Hide failed jobs when a newer completed job has the same output folder.")
     p_jobs.set_defaults(func=cmd_jobs)
 
     p_pause = command_parser(sub, "pause-queue", help="Pause the background queue after the current running job.", description="Pause queued jobs. The currently running conversion is allowed to continue.", examples="""
@@ -1743,6 +1752,21 @@ def build_parser() -> argparse.ArgumentParser:
     add_makemkv_args(p_validate)
     p_validate.add_argument("--verbose", action="store_true")
     p_validate.set_defaults(func=cmd_validate)
+
+    p_diagnose = command_parser(sub, "diagnose", help="Create a redacted support bundle.", description="Create a shareable diagnostic zip with redacted logs, tool versions, validation output, and file manifests. Media files and raw disc assets are not included.", examples="""
+  py bd2hevc.py diagnose "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py diagnose "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --source "BD backups\\Movie Disc"
+  py bd2hevc.py diagnose "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --job 20260429-153012-Movie_Disc
+""")
+    p_diagnose.add_argument("target", help="Converted output folder, source backup folder, or clip to summarize.")
+    p_diagnose.add_argument("--source", default=None, help="Original source backup for reference validation and comparison.")
+    p_diagnose.add_argument("--job", default=None, help="Matching background job id or prefix when auto-detection is not enough.")
+    p_diagnose.add_argument("--output", default=None, help="Destination zip or folder. Defaults to reports/diagnostics/<disc>-<timestamp>.zip.")
+    p_diagnose.add_argument("--log-lines", type=int, default=500, help="Number of job log lines to include from the end of the log.")
+    p_diagnose.add_argument("--no-validation", action="store_true", help="Skip the lightweight no-MakeMKV validation pass.")
+    p_diagnose.add_argument("--no-zip", action="store_true", help="Write an unpacked diagnostic folder instead of a zip file.")
+    p_diagnose.add_argument("--json", action="store_true", help="Print machine-readable command output.")
+    p_diagnose.set_defaults(func=cmd_diagnose)
 
     p_playlist = command_parser(sub, "playlist-probe", help="Probe a Blu-ray playlist through libbluray/FFprobe and fail on stale CLPI packet maps.", description="Probe one MPLS playlist through libbluray/FFprobe, useful when VLC progress or seeking looks wrong.", examples="""
   py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23

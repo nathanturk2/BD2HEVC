@@ -45,8 +45,8 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Logs and reports
-      description: Paste relevant excerpts or attach redacted `reports/jobs/*.log`, `*.report.json`, or validation output.
+      label: Diagnostic bundle, logs, and reports
+      description: Prefer attaching a zip from `python bd2hevc.py diagnose "Converted output" --source "Original backup"`. Otherwise paste relevant redacted excerpts.
       render: text
   - type: textarea
     id: notes

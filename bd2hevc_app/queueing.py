@@ -551,11 +551,62 @@ def cmd_jobs(args: argparse.Namespace) -> int:
             return (1, float(job.get("queue_order") or 0))
         return (2, -path.stat().st_mtime)
 
-    if queue_is_paused():
-        print(f"Queue: paused ({QUEUE_PAUSE_FILE})")
-    for path, job in sorted(jobs, key=sort_key)[: args.limit]:
+    def status_category(status: str) -> str:
+        if status in {"running", "queued", "paused"}:
+            return "active"
+        if status.startswith("failed"):
+            return "failed"
+        if status == "completed":
+            return "completed"
+        if status == "canceled":
+            return "canceled"
+        return "other"
+
+    selected_categories = {
+        name
+        for name, selected in (
+            ("active", getattr(args, "active", False)),
+            ("failed", getattr(args, "failed", False)),
+            ("completed", getattr(args, "completed", False)),
+            ("canceled", getattr(args, "canceled", False)),
+        )
+        if selected
+    }
+    enriched: list[tuple[Path, dict[str, Any], str, str]] = []
+    for path, job in jobs:
         job["job_file"] = str(path)
         status = job_runtime_status(job)
+        enriched.append((path, job, status, status_category(status)))
+
+    if getattr(args, "hide_old_failed", False):
+        latest_completed_by_output: dict[str, float] = {}
+        for path, job, _status, category in enriched:
+            if category != "completed":
+                continue
+            output = str(job.get("output") or "")
+            if not output:
+                continue
+            order = float(job.get("queue_order") or path.stat().st_mtime)
+            latest_completed_by_output[output] = max(order, latest_completed_by_output.get(output, 0.0))
+        filtered: list[tuple[Path, dict[str, Any], str, str]] = []
+        for path, job, status, category in enriched:
+            output = str(job.get("output") or "")
+            order = float(job.get("queue_order") or path.stat().st_mtime)
+            if category == "failed" and output and latest_completed_by_output.get(output, 0.0) > order:
+                continue
+            filtered.append((path, job, status, category))
+        enriched = filtered
+
+    if selected_categories:
+        enriched = [item for item in enriched if item[3] in selected_categories]
+
+    if not enriched:
+        print("No matching BD2HEVC jobs found.")
+        return 0
+
+    if queue_is_paused():
+        print(f"Queue: paused ({QUEUE_PAUSE_FILE})")
+    for path, job, status, _category in sorted(enriched, key=lambda item: sort_key((item[0], item[1])))[: args.limit]:
         print(f"{job.get('id')}  {status}")
         if status == "queued":
             for line in queue_waiting_lines(job):

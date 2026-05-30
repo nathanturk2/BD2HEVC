@@ -32,6 +32,7 @@ guaranteed.
 - [Quality And Audio Recipes](#quality-and-audio-recipes)
 - [VLC Compatibility Fixes](#vlc-compatibility-fixes)
 - [Normal Validation](#normal-validation)
+- [Automated Support Reports](#automated-support-reports)
 - [Requirements](#requirements)
 - [Installing Tools](#installing-tools)
 - [VLC Java Setup For Menus](#vlc-java-setup-for-menus)
@@ -48,6 +49,14 @@ Check that BD2HEVC can see the tools it needs:
 
 ```bash
 python bd2hevc.py tools
+```
+
+Every command has built-in help with examples:
+
+```bash
+python bd2hevc.py --help
+python bd2hevc.py queue --help
+python bd2hevc.py diagnose --help
 ```
 
 Convert in the foreground:
@@ -128,6 +137,15 @@ List recent jobs:
 
 ```bash
 python bd2hevc.py jobs
+```
+
+Useful job filters:
+
+```bash
+python bd2hevc.py jobs --active
+python bd2hevc.py jobs --failed
+python bd2hevc.py jobs --failed --hide-old-failed
+python bd2hevc.py jobs --completed --limit 30
 ```
 
 Pause the queue after the current running conversion:
@@ -268,6 +286,37 @@ Save the full validation report:
 
 ```bash
 python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --reference "MY_DISC_BACKUP" --report reports/my_disc.validate.json
+```
+
+## Automated Support Reports
+
+If a converted backup has a menu, gallery, game, subtitle, audio, or playback
+problem that you cannot reproduce on another machine, create a diagnostic bundle:
+
+```bash
+python bd2hevc.py diagnose "Converted UHD-BD/My Disc (BD) (UHD converted)" --source "MY_DISC_BACKUP"
+```
+
+The command writes a zip under `reports/diagnostics/` and prints the exact path.
+Attach that zip to a GitHub issue along with a short description of the playback
+steps that fail.
+
+The diagnostic bundle is designed for public bug reports. It includes:
+
+- BD2HEVC version, OS, Python, and discovered media tool versions.
+- A file manifest with names, sizes, and timestamps.
+- Redacted job metadata, plan, report, exit code, and a log tail when a matching
+  background job is found.
+- A lightweight validation report run without MakeMKV so physical optical drives
+  are not touched.
+
+It intentionally does not include `.m2ts` media, BD-J JARs, keys, decryption
+logs, or raw disc assets. Local absolute paths are replaced with placeholders.
+If BD2HEVC cannot match the output to the correct job automatically, pass the job
+id shown by `python bd2hevc.py jobs`:
+
+```bash
+python bd2hevc.py diagnose "Converted UHD-BD/My Disc (BD) (UHD converted)" --job 20260429-153012-MY_DISC
 ```
 
 ## Requirements
@@ -502,6 +551,14 @@ python bd2hevc.py auto "Disc" --maxrate-multiplier 1.5 --bufsize-multiplier 2.0
 
 These are observations from local testing, not a formal compatibility guarantee.
 
+Locally tested examples include movie discs, bonus discs, episode discs, and
+BD-J interactive extras from titles such as Dune, Dune Part Two, Groundhog Day,
+Speed, The Truman Show, The Princess Bride, Ferris Bueller's Day Off,
+Interstellar, Tenet, Back to the Future discs, Goodbye Mr. Chips, Walter Mitty,
+One Punch Man, Baccano!, Tensura/Re:Zero-style episode discs, and BBC Pride and
+Prejudice. This list is meant to describe coverage shape, not to guarantee every
+edition or region behaves identically.
+
 Well-supported in current testing:
 
 - Full-disc BD-J menu backups with the original menus and extras preserved.
@@ -567,6 +624,12 @@ Patch missing disc metadata on existing outputs:
 
 ```bash
 python bd2hevc.py patch-disc-metadata "Converted UHD-BD"
+```
+
+Create a redacted bundle for a GitHub support issue:
+
+```bash
+python bd2hevc.py diagnose "Converted UHD-BD/My Disc (BD) (UHD converted)" --source "MY_DISC_BACKUP"
 ```
 
 ## JSON Output

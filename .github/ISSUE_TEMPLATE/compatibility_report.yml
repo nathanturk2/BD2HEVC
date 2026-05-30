@@ -46,6 +46,6 @@ body:
   - type: textarea
     id: validation
     attributes:
-      label: Validation output
-      description: Paste concise validation output or attach redacted reports.
+      label: Diagnostic bundle or validation output
+      description: Prefer attaching a zip from `python bd2hevc.py diagnose "Converted output" --source "Original backup"`. Otherwise paste concise validation output or attach redacted reports.
       render: text

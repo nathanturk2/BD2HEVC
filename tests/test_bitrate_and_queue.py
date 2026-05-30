@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from bd2hevc_app import core as bd
-from bd2hevc_app import bdj, bitrate, config, encoding, muxing, navigation, output, progress, queueing, repair, scan, tools, validation
+from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, muxing, navigation, output, progress, queueing, repair, scan, tools, validation
 
 
 class ModuleSplitTests(unittest.TestCase):
@@ -51,6 +51,18 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIs(repair.select_output_repair_clips, bd.select_output_repair_clips)
         self.assertIs(repair.reencode_replacement_clip, bd.reencode_replacement_clip)
         self.assertIs(progress.fit_terminal_line, bd.fit_terminal_line)
+        self.assertIs(diagnostics.cmd_diagnose, bd.cmd_diagnose)
+
+    def test_diagnose_help_is_available(self) -> None:
+        parser = bd.build_parser()
+        with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["diagnose", "--help"])
+            diagnose_help = buffer.getvalue()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("Create a shareable diagnostic zip", diagnose_help)
+        self.assertIn('py bd2hevc.py diagnose "Converted UHD-BD', diagnose_help)
 
     def test_watch_lines_are_truncated_to_terminal_width(self) -> None:
         line = "Log: " + ("x" * 120)
@@ -660,6 +672,76 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("Queue: 2 jobs ahead", lines)
         self.assertIn("Next ahead: job-1", lines)
         self.assertIn("Also ahead: job-2", lines)
+
+    def test_jobs_can_filter_failed_and_hide_superseded_failures(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with mock.patch.object(queueing, "DEFAULT_JOB_DIR", root):
+                output_a = root / "Output A (BD) (UHD converted)"
+                output_b = root / "Output B (BD) (UHD converted)"
+                jobs = [
+                    ("failed-old", 1.0, output_a, "1"),
+                    ("completed-new", 2.0, output_a, "0"),
+                    ("failed-current", 3.0, output_b, "1"),
+                ]
+                for job_id, order, output_path, exitcode in jobs:
+                    paths = queueing.job_paths(job_id)
+                    queueing.save_job(
+                        paths["job"],
+                        {
+                            "id": job_id,
+                            "status": "completed",
+                            "queue_order": order,
+                            "output": str(output_path),
+                            "exitcode": str(paths["exitcode"]),
+                        },
+                    )
+                    paths["exitcode"].write_text(exitcode, encoding="utf-8")
+                args = argparse.Namespace(
+                    limit=10,
+                    active=False,
+                    failed=True,
+                    completed=False,
+                    canceled=False,
+                    hide_old_failed=True,
+                )
+                with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+                    queueing.cmd_jobs(args)
+                    text = buffer.getvalue()
+
+        self.assertIn("failed-current", text)
+        self.assertNotIn("failed-old", text)
+        self.assertNotIn("completed-new", text)
+
+    def test_diagnostic_bundle_redacts_paths_and_omits_raw_disc_assets(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "Sample Disc (BD) (UHD converted)"
+            stream_dir = target / "BDMV" / "STREAM"
+            stream_dir.mkdir(parents=True)
+            (stream_dir / "00001.m2ts").write_bytes(b"not real media")
+            (target / "BDMV" / "index.bdmv").write_bytes(b"metadata")
+            out = root / "diagnostic"
+            with (
+                mock.patch.object(diagnostics, "DEFAULT_REPORT_DIR", root / "reports"),
+                mock.patch.object(diagnostics, "collect_tool_summary", return_value={"paths": {}, "versions": {}}),
+            ):
+                result = diagnostics.create_diagnostic_bundle(
+                    target,
+                    output=out,
+                    run_validation=False,
+                    zip_output=False,
+                )
+
+            diagnostic_path = Path(result["bundle"]) / "diagnostic.json"
+            payload_text = diagnostic_path.read_text(encoding="utf-8")
+            payload = json.loads(payload_text)
+
+        self.assertTrue(result["ok"])
+        self.assertNotIn(str(target), payload_text)
+        self.assertEqual(payload["target"]["counts_by_suffix"][".m2ts"], 1)
+        self.assertTrue(payload["target"]["files"][0]["raw_disc_file"] or payload["target"]["files"][1]["raw_disc_file"])
+        self.assertFalse((Path(result["bundle"]) / "BDMV").exists())
 
     def test_legacy_anime_cq18_alias_still_maps_to_compact_cq(self) -> None:
         plan = bd.equivalent_hevc_bitrate(
