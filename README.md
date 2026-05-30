@@ -551,14 +551,18 @@ python bd2hevc.py auto "Disc" --maxrate-multiplier 1.5 --bufsize-multiplier 2.0
 ## Supported So Far
 
 These are observations from local testing, not a formal compatibility guarantee.
-
-Locally tested examples include movie discs, bonus discs, episode discs, and
-BD-J interactive extras from titles such as Dune, Dune Part Two, Groundhog Day,
-Speed, The Truman Show, The Princess Bride, Ferris Bueller's Day Off,
-Interstellar, Tenet, Back to the Future discs, Goodbye Mr. Chips, Walter Mitty,
-One Punch Man, Baccano!, Tensura/Re:Zero-style episode discs, and BBC Pride and
-Prejudice. This list is meant to describe coverage shape, not to guarantee every
+At the time of writing, every locally converted backup available for spot checks
+has worked in VLC/libbluray, but future discs may still expose new BD-J or player
+edge cases. The list below describes coverage shape, not a promise that every
 edition or region behaves identically.
+
+| Coverage area | Locally tried examples | Notes |
+| --- | --- | --- |
+| Movie discs | Dune, Dune Part Two, Groundhog Day, The Princess Bride, Ferris Bueller's Day Off, Interstellar, Tenet, The Truman Show, Walter Mitty, Goodbye Mr. Chips | Main playback, menu return, and extras workflows have been spot checked in VLC. |
+| Bonus and non-feature discs | Interstellar bonus disc, Back to the Future bonus disc | Handles discs without an obvious single main title. |
+| Episode and compact CQ discs | One Punch Man, Baccano!, Tensura/Re:Zero-style episode discs, BBC Pride and Prejudice | Covers multi-episode layouts, `compact-cq`, and `--top-n-cq` workflows. |
+| Interactive BD-J extras | Speed, The Truman Show galleries, game-containing discs | Covers BD-J games, galleries, and menu timing repairs after CLPI/navigation fixes. |
+| Optional validation helpers | MakeMKV title scanning, VLC smoke logs, diagnostic bundles | Useful for catching structure/player issues without sharing disc assets. |
 
 Well-supported in current testing:
 

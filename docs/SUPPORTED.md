@@ -2,6 +2,20 @@
 
 This is based on local testing so far, not a certification promise.
 
+At the time of writing, every locally converted backup available for spot
+checking has worked in VLC/libbluray. That is useful evidence, but BD-J discs can
+still do unusual things and future discs may expose new compatibility fixes.
+
+## Local Coverage Examples
+
+| Coverage area | Locally tried examples | Notes |
+| --- | --- | --- |
+| Movie discs | Dune, Dune Part Two, Groundhog Day, The Princess Bride, Ferris Bueller's Day Off, Interstellar, Tenet, The Truman Show, Walter Mitty, Goodbye Mr. Chips | Main playback, menu return, and extras workflows have been spot checked in VLC. |
+| Bonus and non-feature discs | Interstellar bonus disc, Back to the Future bonus disc | Handles discs without an obvious single main title. |
+| Episode and compact CQ discs | One Punch Man, Baccano!, Tensura/Re:Zero-style episode discs, BBC Pride and Prejudice | Covers multi-episode layouts, `compact-cq`, and `--top-n-cq` workflows. |
+| Interactive BD-J extras | Speed, The Truman Show galleries, game-containing discs | Covers BD-J games, galleries, and menu timing repairs after CLPI/navigation fixes. |
+| Optional validation helpers | MakeMKV title scanning, VLC smoke logs, diagnostic bundles | Useful for catching structure/player issues without sharing disc assets. |
+
 ## Works Well So Far
 
 - Windows and Linux conversion workflows.
