@@ -278,6 +278,18 @@ python bd2hevc.py clips "Disc"
 python bd2hevc.py clips "Disc" --quality cq:20 --top-n-quality 3 cq:18
 ```
 
+Example output:
+
+```text
+BD2HEVC clips for Episode Disc
+clip         duration action       source     output   src Mbps  quality
+------------ -------- ------------ ---------- -------- --------  ------------------------
+00001.m2ts   00:24:02 reencode     h264       hevc        18.7  cq:18 (compact-cq)
+00002.m2ts   00:23:55 reencode     h264       hevc        18.1  cq:18 (compact-cq)
+00003.m2ts   00:02:14 copy         mpeg2video mpeg2video   4.4  copy
+00004.m2ts   00:00:07 copy         h264       h264         2.1  copy
+```
+
 Use any quality for the main title:
 
 ```bash
