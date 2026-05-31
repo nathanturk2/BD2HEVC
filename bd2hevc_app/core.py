@@ -2259,8 +2259,9 @@ def cmd_queue(args: argparse.Namespace) -> int:
 def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--quality", default=None, help="General video handling for reencode-eligible clips. Accepts a bitrate preset, cq:N, source-ratio:N, legacy presets such as anime-cq18/episode-compact, or copy/no-reencode. Overrides --bitrate-mode when set.")
     parser.add_argument("--bitrate-mode", choices=BITRATE_MODES, default="balanced", help="HEVC bitrate preset. balanced is the tested default; smaller saves more space; transparent spends more bitrate; source-ratio uses a fixed multiplier; compact-cq uses configurable CQ for reencoded clips. episode-compact and anime-cq18 are accepted as legacy aliases.")
-    parser.add_argument("--bitrate-preset-file", default=None, help="Load bitrate settings from a JSON preset file. Non-default CLI options override preset fields.")
+    parser.add_argument("--bitrate-preset-file", "--preset-file", dest="bitrate_preset_file", default=None, help="Load bitrate settings from a JSON preset file. Non-default CLI options override preset fields.")
     parser.add_argument("--hevc-bitrate-factor", type=float, default=None, help="Override bitrate mode with a fixed HEVC/source video bitrate multiplier, e.g. 0.62.")
+    parser.add_argument("--codec-source-ratio", action="append", default=None, metavar="CODEC=FACTOR", help="Override the HEVC/source multiplier for one source codec, e.g. h264=0.55, mpeg2video=0.30, or vc1=0.45. Can be repeated and overrides the general source ratio for matching clips.")
     parser.add_argument("--min-video-bitrate", type=parse_bitrate_arg, default=2_000_000, help="Minimum target video bitrate. Accepts values like 2000k or 2M.")
     parser.add_argument("--max-video-bitrate", type=parse_bitrate_arg, default=80_000_000, help="Maximum target video bitrate. Accepts values like 80M.")
     parser.add_argument("--maxrate-multiplier", type=float, default=1.55, help="VBV maxrate multiplier relative to target bitrate.")

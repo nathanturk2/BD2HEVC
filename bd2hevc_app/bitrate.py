@@ -203,6 +203,13 @@ def preset_float(value: Any, key: str) -> float:
     return parsed
 
 
+def preset_positive_float(value: Any, key: str) -> float:
+    parsed = preset_float(value, key)
+    if parsed <= 0:
+        raise ToolError(f"{key} must be greater than zero")
+    return parsed
+
+
 def preset_int(value: Any, key: str) -> int:
     try:
         parsed = int(value)
@@ -226,6 +233,75 @@ def preset_or_arg(
     return arg_value
 
 
+def normalize_codec_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    compact = text.replace(".", "").replace("-", "").replace("_", "").replace(" ", "")
+    if compact in {"h264", "avc", "mpeg4avc", "avc1"}:
+        return "h264"
+    if compact in {"mpeg2", "mpeg2video", "mpeg1", "mpeg1video", "mpgv"}:
+        return "mpeg2video"
+    if compact in {"vc1", "wmv3"}:
+        return "vc1"
+    return compact or text
+
+
+def parse_codec_factor_pair(value: Any, *, key: str) -> tuple[str, float]:
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        codec_raw, factor_raw = value
+    elif isinstance(value, str):
+        if "=" in value:
+            codec_raw, factor_raw = value.split("=", 1)
+        elif ":" in value:
+            codec_raw, factor_raw = value.split(":", 1)
+        else:
+            raise ToolError(f"{key} entries must use CODEC=FACTOR")
+    else:
+        raise ToolError(f"{key} entries must use CODEC=FACTOR")
+    codec = normalize_codec_key(codec_raw)
+    if not codec:
+        raise ToolError(f"{key} codec cannot be empty")
+    factor = preset_positive_float(factor_raw, f"{key}.{codec}")
+    return codec, factor
+
+
+def codec_factor_overrides_from_value(value: Any, *, key: str) -> dict[str, float]:
+    if value is None:
+        return {}
+    parsed: dict[str, float] = {}
+    if isinstance(value, dict):
+        for codec_raw, factor_raw in value.items():
+            codec = normalize_codec_key(codec_raw)
+            if not codec:
+                raise ToolError(f"{key} codec cannot be empty")
+            parsed[codec] = preset_positive_float(factor_raw, f"{key}.{codec}")
+        return parsed
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",") if item.strip()]
+        for item in items:
+            codec, factor = parse_codec_factor_pair(item, key=key)
+            parsed[codec] = factor
+        return parsed
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            parsed.update(codec_factor_overrides_from_value(item, key=key))
+        return parsed
+    raise ToolError(f"{key} must be an object, list, or CODEC=FACTOR string")
+
+
+def codec_factor_overrides_from_args(args: argparse.Namespace, preset: dict[str, Any]) -> dict[str, float] | None:
+    overrides: dict[str, float] = {}
+    preset_raw = preset_value(
+        preset,
+        "codec_source_ratios",
+        "codec_source_ratio",
+        "codec_hevc_bitrate_factors",
+        "codec_factors",
+    )
+    overrides.update(codec_factor_overrides_from_value(preset_raw, key="codec_source_ratios"))
+    overrides.update(codec_factor_overrides_from_value(getattr(args, "codec_source_ratio", None), key="--codec-source-ratio"))
+    return overrides or None
+
+
 def bitrate_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
     preset = load_bitrate_preset_file(getattr(args, "bitrate_preset_file", None))
     preset_mode = preset_value(preset, "bitrate_mode", "mode")
@@ -237,6 +313,7 @@ def bitrate_options_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "mode": mode,
         "factor_override": preset_or_arg(args, "hevc_bitrate_factor", None, preset, ("hevc_bitrate_factor", "factor"), preset_float),
+        "codec_factor_overrides": codec_factor_overrides_from_args(args, preset),
         "min_bps": preset_or_arg(args, "min_video_bitrate", 2_000_000, preset, ("min_video_bitrate", "min_bps"), preset_bitrate),
         "max_bps": preset_or_arg(args, "max_video_bitrate", 80_000_000, preset, ("max_video_bitrate", "max_bps"), preset_bitrate),
         "maxrate_multiplier": preset_or_arg(args, "maxrate_multiplier", 1.55, preset, ("maxrate_multiplier",), preset_float),
@@ -312,6 +389,7 @@ def equivalent_hevc_bitrate(
     source_codec: str | None = None,
     mode: str = "balanced",
     factor_override: float | None = None,
+    codec_factor_overrides: dict[str, Any] | None = None,
     min_bps: int = 2_000_000,
     max_bps: int = 80_000_000,
     maxrate_multiplier: float = 1.55,
@@ -332,7 +410,10 @@ def equivalent_hevc_bitrate(
         raise ToolError("--compact-cq-min-duration must be greater than zero")
     if compact_cq_value < 0 or compact_cq_value > 51:
         raise ToolError("--compact-cq-value must be between 0 and 51")
-    if mode == ANIME_CQ_PRESET and factor_override is None and (duration_seconds or 0) >= anime_cq_min_duration:
+    codec = normalize_codec_key(source_codec)
+    codec_factors = codec_factor_overrides_from_value(codec_factor_overrides, key="codec_factor_overrides")
+    codec_factor = codec_factors.get(codec)
+    if mode == ANIME_CQ_PRESET and factor_override is None and codec_factor is None and (duration_seconds or 0) >= anime_cq_min_duration:
         maxrate = int(round_to(min(100_000_000, max_bps), 100_000))
         bufsize = int(round_to(min(160_000_000, maxrate * bufsize_multiplier), 100_000))
         return {
@@ -350,13 +431,14 @@ def equivalent_hevc_bitrate(
             "compact_cq_value": compact_cq_value,
             "max_mbps": mbps(max_bps),
             "bufsize_multiplier": bufsize_multiplier,
-            "source_codec": (source_codec or "").lower() or None,
+            "source_codec": codec or None,
+            "codec_factor_overrides": codec_factors or None,
             "reason": (
                 f"compact-cq preset: CQ {compact_cq_value} for clips at least "
                 f"{format_duration(anime_cq_min_duration)}"
             ),
         }
-    bitrate_mode = "smaller" if mode == ANIME_CQ_PRESET and factor_override is None else mode
+    bitrate_mode = "smaller" if mode == ANIME_CQ_PRESET and factor_override is None and codec_factor is None else mode
     if not video_bps or not width or not height or not fps:
         return {
             "target_bps": None,
@@ -365,12 +447,16 @@ def equivalent_hevc_bitrate(
             "factor": None,
             "mode": mode,
             "rate_control": "vbr",
+            "source_codec": codec or None,
+            "codec_factor_overrides": codec_factors or None,
             "reason": "missing source video bitrate, dimensions, or frame rate",
         }
-    codec = (source_codec or "").lower()
     bpppf = video_bps / (width * height * fps)
     effective_min_bps = min_bps
-    if factor_override is not None:
+    if codec_factor is not None:
+        factor = codec_factor
+        factor_reason = f"codec-specific HEVC/source bitrate factor for {codec}"
+    elif factor_override is not None:
         if factor_override <= 0:
             raise ToolError("--hevc-bitrate-factor must be greater than zero")
         factor = factor_override
@@ -401,7 +487,10 @@ def equivalent_hevc_bitrate(
         factor *= codec_scale
         factor_reason = f"HEVC source-equivalent bitrate curve from {codec_reason} bits-per-pixel-per-frame"
     if mode == ANIME_CQ_PRESET:
-        factor_reason += "; compact-cq fallback uses smaller for short reencoded clips"
+        if factor_override is not None or codec_factor is not None:
+            factor_reason += "; explicit bitrate factor overrides compact-cq CQ"
+        else:
+            factor_reason += "; compact-cq fallback uses smaller for short reencoded clips"
     target = int(round_to(video_bps * factor, 100_000))
     target = max(effective_min_bps, min(target, max_bps))
     maxrate = int(round_to(min(100_000_000, max(target * maxrate_multiplier, target + 2_000_000)), 100_000))
@@ -426,6 +515,7 @@ def equivalent_hevc_bitrate(
         "bufsize_multiplier": bufsize_multiplier,
         "source_bpppf": round(bpppf, 5),
         "source_codec": codec or None,
+        "codec_factor_overrides": codec_factors or None,
         "reason": factor_reason,
     }
 

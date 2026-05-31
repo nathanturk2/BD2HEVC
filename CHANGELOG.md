@@ -90,6 +90,11 @@
 - Added `--copy-clips` / `--exclude-clips` for preserving selected source clips
   untouched when a menu, game, or authored still-video clip should not be
   reencoded.
+- Added codec-specific source-ratio overrides through repeatable
+  `--codec-source-ratio CODEC=FACTOR` and JSON preset
+  `codec_source_ratios`, so mixed AVC/MPEG-2/VC-1 discs can use different
+  HEVC/source multipliers while keeping one general preset.
+- Added `--preset-file` as a shorter alias for `--bitrate-preset-file`.
 - Compact stereo audio now skips unplayable zero-channel streams that FFprobe
   can misidentify as audio, and maps source audio by stream index.
 - Improved generated output names with acronym and Roman numeral preservation,

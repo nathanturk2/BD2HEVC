@@ -235,6 +235,16 @@ reencode. It accepts bitrate presets (`smaller`, `balanced`, `transparent`,
 `ratio:0.62`, or `0.62x`), CQ values (`cq:18`, `cq:20`), legacy preset names
 (`episode-compact`, `anime-cq18`), or `copy`/`no-reencode`.
 
+If a disc mixes codecs, the general source ratio can be combined with
+codec-specific ratios:
+
+```bash
+python bd2hevc.py queue "Mixed Codec Disc" --output-dir "Converted UHD-BD" --quality source-ratio:0.60 --codec-source-ratio h264=0.55 --codec-source-ratio mpeg2video=0.30 --codec-source-ratio vc1=0.45
+```
+
+The codec-specific ratio wins only for matching source clips. Other clips keep
+the general ratio or preset.
+
 For storage-limited movie collections, you can spend more bits on the main
 feature while keeping extras compact:
 
@@ -612,6 +622,18 @@ clips at or below 10 seconds are copied. `source-ratio` and
 `source-ratio:0.62` intentionally use a fixed source-video multiplier, while
 `cq:N` uses CQ rate control instead of the bitrate curve.
 
+For source-ratio workflows, a general multiplier can be paired with
+codec-specific overrides. This is useful because an AVC/H.264 source, an MPEG-2
+source, and a VC-1 source usually should not all receive the same HEVC/source
+factor:
+
+```bash
+python bd2hevc.py auto "Disc" --quality source-ratio:0.60 --codec-source-ratio h264=0.55 --codec-source-ratio mpeg2video=0.30 --codec-source-ratio vc1=0.45
+```
+
+Accepted codec aliases include `h264`, `avc`, `H.264`, `mpeg2`,
+`mpeg2video`, `vc1`, `VC-1`, and `wmv3`.
+
 Presets:
 
 ```bash
@@ -672,9 +694,13 @@ long command line:
 
 ```json
 {
-  "mode": "compact-cq",
-  "compact_cq_value": 20,
-  "compact_cq_min_duration": "10s",
+  "mode": "source-ratio",
+  "factor": 0.60,
+  "codec_source_ratios": {
+    "h264": 0.55,
+    "mpeg2video": 0.30,
+    "vc1": 0.45
+  },
   "max_video_bitrate": "70M"
 }
 ```
@@ -682,19 +708,25 @@ long command line:
 Use it like this:
 
 ```bash
-python bd2hevc.py auto "Disc" --bitrate-preset-file examples/bitrate/compact-cq20.json
+python bd2hevc.py auto "Disc" --preset-file examples/bitrate/source-ratio-by-codec.json
 ```
 
-Preset files can set `mode`, `hevc_bitrate_factor`, `min_video_bitrate`,
-`max_video_bitrate`, `maxrate_multiplier`, `bufsize_multiplier`,
-`compact_cq_value`, and `compact_cq_min_duration`. Non-default CLI flags still
-work for one-off overrides.
+Preset files can set `mode`, `hevc_bitrate_factor` or `factor`,
+`min_video_bitrate`, `max_video_bitrate`, `maxrate_multiplier`,
+`bufsize_multiplier`, `compact_cq_value`, `compact_cq_min_duration`, and
+`codec_source_ratios`.
+Non-default CLI flags still work for one-off overrides. For example, a preset
+can hold the normal source ratios while a command line can temporarily add or
+replace one codec ratio with `--codec-source-ratio mpeg2video=0.28`.
+`--bitrate-preset-file` is the full spelling; `--preset-file` is the short
+alias.
 
 Manual controls:
 
 ```bash
 python bd2hevc.py auto "Disc" --hevc-bitrate-factor 0.62
 python bd2hevc.py auto "Disc" --quality source-ratio:0.62
+python bd2hevc.py auto "Disc" --quality source-ratio:0.60 --codec-source-ratio mpeg2video=0.30
 python bd2hevc.py auto "Disc" --min-video-bitrate 2500k --max-video-bitrate 60M
 python bd2hevc.py auto "Disc" --maxrate-multiplier 1.5 --bufsize-multiplier 2.0
 ```

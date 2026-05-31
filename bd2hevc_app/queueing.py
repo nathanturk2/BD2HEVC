@@ -304,6 +304,8 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--quality", getattr(args, "quality", None))
     append_option(argv, "--bitrate-mode", getattr(args, "bitrate_mode", "balanced"), "balanced")
     append_option(argv, "--hevc-bitrate-factor", getattr(args, "hevc_bitrate_factor", None))
+    for codec_ratio in getattr(args, "codec_source_ratio", None) or []:
+        argv.extend(["--codec-source-ratio", str(codec_ratio)])
     append_option(argv, "--min-video-bitrate", getattr(args, "min_video_bitrate", 2_000_000), 2_000_000)
     append_option(argv, "--max-video-bitrate", getattr(args, "max_video_bitrate", 80_000_000), 80_000_000)
     append_option(argv, "--maxrate-multiplier", getattr(args, "maxrate_multiplier", 1.55), 1.55)

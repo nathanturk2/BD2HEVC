@@ -39,6 +39,7 @@ class ModuleSplitTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         self.assertIn("--quality", clips_help)
+        self.assertIn("--preset-file", clips_help)
         self.assertIn("--top-n-quality", clips_help)
         self.assertIn("--clip-quality", clips_help)
 
@@ -309,6 +310,87 @@ class BitratePresetTests(unittest.TestCase):
         self.assertEqual(options["compact_cq_value"], 20)
         self.assertEqual(options["anime_cq_min_duration"], 7 * 60)
         self.assertEqual(options["max_bps"], 70_000_000)
+
+    def test_codec_source_ratio_preset_and_cli_overrides_are_normalized(self) -> None:
+        with TemporaryDirectory() as temp:
+            preset = Path(temp) / "preset.json"
+            preset.write_text(
+                json.dumps(
+                    {
+                        "mode": "source-ratio",
+                        "factor": 0.60,
+                        "codec_source_ratios": {
+                            "H.264": 0.56,
+                            "mpeg2": "0.32",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                bitrate_preset_file=str(preset),
+                bitrate_mode="balanced",
+                hevc_bitrate_factor=None,
+                codec_source_ratio=["mpeg2video=0.30", "vc-1:0.45"],
+                min_video_bitrate=2_000_000,
+                max_video_bitrate=80_000_000,
+                maxrate_multiplier=1.55,
+                bufsize_multiplier=2.0,
+                anime_cq_min_duration=config.DEFAULT_ANIME_CQ_MIN_DURATION,
+                compact_cq_value=config.ANIME_CQ_VALUE,
+            )
+            options = bd.bitrate_options_from_args(args)
+
+        self.assertEqual(options["mode"], "source-ratio")
+        self.assertEqual(options["factor_override"], 0.60)
+        self.assertEqual(options["codec_factor_overrides"], {"h264": 0.56, "mpeg2video": 0.30, "vc1": 0.45})
+
+    def test_codec_source_ratio_overrides_general_source_ratio_by_codec(self) -> None:
+        h264 = bd.equivalent_hevc_bitrate(
+            video_bps=20_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=120.0,
+            source_codec="h264",
+            mode="source-ratio",
+            factor_override=0.60,
+            codec_factor_overrides={"mpeg2": 0.30},
+        )
+        mpeg2 = bd.equivalent_hevc_bitrate(
+            video_bps=20_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=120.0,
+            source_codec="mpeg2video",
+            mode="source-ratio",
+            factor_override=0.60,
+            codec_factor_overrides={"mpeg2": 0.30},
+        )
+
+        self.assertEqual(h264["target_bps"], 12_000_000)
+        self.assertEqual(h264["factor"], 0.6)
+        self.assertEqual(mpeg2["target_bps"], 6_000_000)
+        self.assertEqual(mpeg2["factor"], 0.3)
+        self.assertIn("codec-specific", mpeg2["reason"])
+
+    def test_codec_source_ratio_can_force_vbr_for_matching_compact_cq_clip(self) -> None:
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=12_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=20 * 60,
+            source_codec="avc",
+            mode="compact-cq",
+            codec_factor_overrides={"h264": 0.50},
+        )
+
+        self.assertEqual(plan["rate_control"], "vbr")
+        self.assertEqual(plan["target_bps"], 6_000_000)
+        self.assertEqual(plan["factor"], 0.5)
+        self.assertIn("explicit bitrate factor overrides compact-cq", plan["reason"])
 
 
 class CopyPlanningTests(unittest.TestCase):
@@ -814,6 +896,7 @@ class CommandConstructionTests(unittest.TestCase):
             quality=None,
             bitrate_mode="balanced",
             hevc_bitrate_factor=None,
+            codec_source_ratio=["h264=0.55", "mpeg2=0.30"],
             min_video_bitrate=2_000_000,
             max_video_bitrate=80_000_000,
             maxrate_multiplier=1.55,
@@ -852,6 +935,9 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("--copy-clips", cmd)
         copy_index = cmd.index("--copy-clips")
         self.assertEqual(cmd[copy_index + 1 : copy_index + 3], ["00014", "00015.m2ts"])
+        first_ratio_index = cmd.index("--codec-source-ratio")
+        self.assertEqual(cmd[first_ratio_index + 1], "h264=0.55")
+        self.assertEqual(cmd[first_ratio_index + 3], "mpeg2=0.30")
 
     def test_compact_audio_pipeline_runs_audio_before_mux_per_clip(self) -> None:
         args = argparse.Namespace(encode_ahead_depth=2, audio_mode="compact-stereo")

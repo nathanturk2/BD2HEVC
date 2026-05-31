@@ -1,0 +1,10 @@
+{
+  "mode": "source-ratio",
+  "factor": 0.6,
+  "codec_source_ratios": {
+    "h264": 0.55,
+    "mpeg2video": 0.3,
+    "vc1": 0.45
+  },
+  "max_video_bitrate": "70M"
+}
