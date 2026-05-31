@@ -95,6 +95,9 @@
   `codec_source_ratios`, so mixed AVC/MPEG-2/VC-1 discs can use different
   HEVC/source multipliers while keeping one general preset.
 - Added `--preset-file` as a shorter alias for `--bitrate-preset-file`.
+- Added named preset management with `preset save/list/show/remove` and
+  `--preset NAME`, so common quality/audio profiles can be created, reused, and
+  removed without manually editing or remembering JSON file paths.
 - Compact stereo audio now skips unplayable zero-channel streams that FFprobe
   can misidentify as audio, and maps source audio by stream index.
 - Improved generated output names with acronym and Roman numeral preservation,

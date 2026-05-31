@@ -96,6 +96,13 @@ from .progress import (
     progress_event,
     read_text_flexible,
 )
+from .presets import (
+    apply_named_preset_to_args,
+    cmd_preset_list,
+    cmd_preset_remove,
+    cmd_preset_save,
+    cmd_preset_show,
+)
 from .queueing import (
     auto_command_for_job,
     cmd_cancel_job,
@@ -2256,10 +2263,18 @@ def cmd_queue(args: argparse.Namespace) -> int:
     return 0
 
 
-def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
+def cmd_preset_save_validated(args: argparse.Namespace) -> int:
+    validate_cq_override_args(args)
+    return cmd_preset_save(args)
+
+
+def add_bitrate_args(parser: argparse.ArgumentParser, *, include_named_preset: bool = True, include_file_preset: bool = True) -> None:
+    if include_named_preset:
+        parser.add_argument("--preset", default=None, help="Load a saved named preset. Use 'python bd2hevc.py preset list' to see available presets.")
     parser.add_argument("--quality", default=None, help="General video handling for reencode-eligible clips. Accepts a bitrate preset, cq:N, source-ratio:N, legacy presets such as anime-cq18/episode-compact, or copy/no-reencode. Overrides --bitrate-mode when set.")
     parser.add_argument("--bitrate-mode", choices=BITRATE_MODES, default="balanced", help="HEVC bitrate preset. balanced is the tested default; smaller saves more space; transparent spends more bitrate; source-ratio uses a fixed multiplier; compact-cq uses configurable CQ for reencoded clips. episode-compact and anime-cq18 are accepted as legacy aliases.")
-    parser.add_argument("--bitrate-preset-file", "--preset-file", dest="bitrate_preset_file", default=None, help="Load bitrate settings from a JSON preset file. Non-default CLI options override preset fields.")
+    if include_file_preset:
+        parser.add_argument("--bitrate-preset-file", "--preset-file", dest="bitrate_preset_file", default=None, help="Load bitrate settings from a JSON preset file. Non-default CLI options override preset fields.")
     parser.add_argument("--hevc-bitrate-factor", type=float, default=None, help="Override bitrate mode with a fixed HEVC/source video bitrate multiplier, e.g. 0.62.")
     parser.add_argument("--codec-source-ratio", action="append", default=None, metavar="CODEC=FACTOR", help="Override the HEVC/source multiplier for one source codec, e.g. h264=0.55, mpeg2video=0.30, or vc1=0.45. Can be repeated and overrides the general source ratio for matching clips.")
     parser.add_argument("--min-video-bitrate", type=parse_bitrate_arg, default=2_000_000, help="Minimum target video bitrate. Accepts values like 2000k or 2M.")
@@ -2323,6 +2338,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  py bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\"\n"
             "  py bd2hevc.py status --watch\n"
             "  py bd2hevc.py clips \"BD backups\\Movie Disc\"\n"
+            "  py bd2hevc.py preset list\n"
             "  py bd2hevc.py jobs\n"
             "  py bd2hevc.py diagnose \"Converted UHD-BD\\Movie (BD) (UHD converted)\"\n"
             "\n"
@@ -2341,6 +2357,37 @@ def build_parser() -> argparse.ArgumentParser:
 """)
     p_tools.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_tools.set_defaults(func=cmd_tools)
+
+    p_preset = command_parser(sub, "preset", help="Save, list, show, and remove named presets.", description="Manage named conversion presets stored in the user config folder.", examples="""
+  py bd2hevc.py preset save sarah --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
+  py bd2hevc.py preset save source-mix --quality source-ratio:0.60 --codec-source-ratio h264=0.55 --codec-source-ratio mpeg2video=0.30
+  py bd2hevc.py preset list
+  py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --preset sarah
+""")
+    preset_sub = p_preset.add_subparsers(dest="preset_command", required=True)
+    p_preset_list = preset_sub.add_parser("list", help="List saved and bundled presets.")
+    p_preset_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_preset_list.set_defaults(func=cmd_preset_list)
+
+    p_preset_show = preset_sub.add_parser("show", help="Show one preset.")
+    p_preset_show.add_argument("name", help="Preset name.")
+    p_preset_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_preset_show.set_defaults(func=cmd_preset_show)
+
+    p_preset_save = preset_sub.add_parser("save", help="Save a named preset from command-line options.")
+    p_preset_save.add_argument("name", help="Preset name. Use letters, numbers, dots, underscores, and hyphens.")
+    p_preset_save.add_argument("--description", default=None, help="Optional short note shown by 'preset list'.")
+    p_preset_save.add_argument("--force", action="store_true", help="Replace an existing preset.")
+    p_preset_save.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_preset_save.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="Save a preferred HEVC encoder in the preset.")
+    p_preset_save.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="Save a preferred HEVC output bit depth.")
+    add_bitrate_args(p_preset_save, include_named_preset=False, include_file_preset=False)
+    add_audio_args(p_preset_save)
+    p_preset_save.set_defaults(func=cmd_preset_save_validated)
+
+    p_preset_remove = preset_sub.add_parser("remove", aliases=["rm", "delete"], help="Remove a user preset.")
+    p_preset_remove.add_argument("name", help="Preset name.")
+    p_preset_remove.set_defaults(func=cmd_preset_remove)
 
     p_scan = command_parser(sub, "scan", help="Scan one or more BDMV backups with MakeMKV and FFprobe.", description="Inspect Blu-ray backup folders before conversion and write scan reports.", examples="""
   py bd2hevc.py scan "BD backups\\Movie Disc"
@@ -2702,9 +2749,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     parser = build_parser()
     args = parser.parse_args(argv)
-    if getattr(args, "decode_sample", None) == 0:
-        args.decode_sample = None
     try:
+        apply_named_preset_to_args(args)
+        if getattr(args, "decode_sample", None) == 0:
+            args.decode_sample = None
         return args.func(args)
     except ToolError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

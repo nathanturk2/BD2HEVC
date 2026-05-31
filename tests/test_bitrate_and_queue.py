@@ -1,6 +1,7 @@
 ﻿import argparse
 import contextlib
 import io
+import os
 import subprocess
 import json
 import unittest
@@ -9,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from bd2hevc_app import core as bd
-from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, muxing, navigation, output, progress, queueing, repair, scan, tools, validation
+from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, muxing, navigation, output, presets, progress, queueing, repair, scan, tools, validation
 
 
 class ModuleSplitTests(unittest.TestCase):
@@ -21,6 +22,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("py bd2hevc.py <command> --help", help_text)
         self.assertIn("py bd2hevc.py queue --help", help_text)
         self.assertIn('py bd2hevc.py clips "BD backups', help_text)
+        self.assertIn("py bd2hevc.py preset list", help_text)
 
         with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
             with self.assertRaises(SystemExit) as raised:
@@ -39,9 +41,18 @@ class ModuleSplitTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 0)
         self.assertIn("--quality", clips_help)
+        self.assertIn("--preset", clips_help)
         self.assertIn("--preset-file", clips_help)
         self.assertIn("--top-n-quality", clips_help)
         self.assertIn("--clip-quality", clips_help)
+
+        with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["preset", "--help"])
+            preset_help = buffer.getvalue()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("preset save", preset_help)
 
     def test_public_modules_import_core_helpers(self) -> None:
         self.assertEqual(config.VERSION, bd.VERSION)
@@ -51,6 +62,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIs(validation.validate_clip, bd.validate_clip)
         self.assertIs(output.copy_disc_tree_skipping_reencoded_streams, bd.copy_disc_tree_skipping_reencoded_streams)
         self.assertIs(progress.progress_event, bd.progress_event)
+        self.assertIs(presets.apply_named_preset_to_args, bd.apply_named_preset_to_args)
         self.assertIs(queueing.job_paths, bd.job_paths)
         self.assertIs(queueing.cmd_status, bd.cmd_status)
         self.assertIs(bdj.patch_known_bdj_compatibility, bd.patch_known_bdj_compatibility)
@@ -391,6 +403,62 @@ class BitratePresetTests(unittest.TestCase):
         self.assertEqual(plan["target_bps"], 6_000_000)
         self.assertEqual(plan["factor"], 0.5)
         self.assertIn("explicit bitrate factor overrides compact-cq", plan["reason"])
+
+    def test_named_preset_save_load_list_and_remove(self) -> None:
+        with TemporaryDirectory() as temp, mock.patch.dict(os.environ, {presets.PRESET_DIR_ENV: temp}):
+            parser = bd.build_parser()
+            save_args = parser.parse_args(
+                [
+                    "preset",
+                    "save",
+                    "sarah",
+                    "--description",
+                    "compact stereo movie profile",
+                    "--quality",
+                    "source-ratio:0.60",
+                    "--main-title-quality",
+                    "cq:18",
+                    "--codec-source-ratio",
+                    "h264=0.55",
+                    "--codec-source-ratio",
+                    "mpeg2video=0.30",
+                    "--audio-mode",
+                    "compact-stereo",
+                ]
+            )
+            with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+                self.assertEqual(save_args.func(save_args), 0)
+                saved_output = buffer.getvalue()
+
+            self.assertIn("Preset saved: sarah", saved_output)
+            preset_path = Path(temp) / "sarah.json"
+            self.assertTrue(preset_path.exists())
+            saved = json.loads(preset_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["quality"], "source-ratio:0.60")
+            self.assertEqual(saved["main_title_quality"], "cq:18")
+            self.assertEqual(saved["codec_source_ratios"], {"h264": 0.55, "mpeg2video": 0.30})
+            self.assertEqual(saved["audio_mode"], "compact-stereo")
+
+            auto_args = parser.parse_args(["auto", "Disc", "--preset", "sarah", "--codec-source-ratio", "mpeg2video=0.28"])
+            bd.apply_named_preset_to_args(auto_args)
+            options = bd.bitrate_options_for_args(auto_args)
+
+            self.assertEqual(auto_args.quality, "source-ratio:0.60")
+            self.assertEqual(auto_args.main_title_quality, "cq:18")
+            self.assertEqual(auto_args.audio_mode, "compact-stereo")
+            self.assertEqual(options["factor_override"], 0.60)
+            self.assertEqual(options["codec_factor_overrides"], {"h264": 0.55, "mpeg2video": 0.28})
+
+            list_args = parser.parse_args(["preset", "list", "--json"])
+            with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+                self.assertEqual(list_args.func(list_args), 0)
+                listing = buffer.getvalue()
+            self.assertIn('"name": "sarah"', listing)
+
+            remove_args = parser.parse_args(["preset", "remove", "sarah"])
+            with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+                self.assertEqual(remove_args.func(remove_args), 0)
+            self.assertFalse(preset_path.exists())
 
 
 class CopyPlanningTests(unittest.TestCase):

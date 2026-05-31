@@ -31,6 +31,7 @@ guaranteed.
 - [Quick Start](#quick-start)
 - [Background Jobs](#background-jobs)
 - [Quality And Audio Recipes](#quality-and-audio-recipes)
+- [Named Presets](#named-presets)
 - [Clip And Quality Overrides](#clip-and-quality-overrides)
 - [VLC Compatibility Fixes](#vlc-compatibility-fixes)
 - [Normal Validation](#normal-validation)
@@ -268,6 +269,39 @@ python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality
 `--top-n-quality` and `--main-title-quality` are mutually exclusive. The older
 spellings `--bitrate-mode compact-cq --compact-cq-value 20`, `--main-title-cq
 18`, and `--top-n-cq 3 18` still work.
+
+## Named Presets
+
+Use named presets when a profile is used repeatedly. Presets are stored in the
+user config folder, so they can be loaded by name instead of by JSON path:
+
+```bash
+python bd2hevc.py preset save sarah --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
+python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --preset sarah
+```
+
+For mixed-codec source-ratio profiles:
+
+```bash
+python bd2hevc.py preset save source-mix --quality source-ratio:0.60 --codec-source-ratio h264=0.55 --codec-source-ratio mpeg2video=0.30 --codec-source-ratio vc1=0.45
+python bd2hevc.py clips "BD backups\Movie Disc" --preset source-mix
+python bd2hevc.py auto "BD backups\Movie Disc" --preset source-mix
+```
+
+Manage presets with:
+
+```bash
+python bd2hevc.py preset list
+python bd2hevc.py preset show source-mix
+python bd2hevc.py preset remove source-mix
+```
+
+Command-line options still override preset values. For example, this uses the
+saved preset but temporarily changes the MPEG-2 source ratio:
+
+```bash
+python bd2hevc.py auto "Disc" --preset source-mix --codec-source-ratio mpeg2video=0.28
+```
 
 ## Clip And Quality Overrides
 
@@ -689,8 +723,14 @@ For anime encodes similar to HandBrake's H.265 10-bit option, add:
 python bd2hevc.py auto "Disc" --quality cq:20 --hevc-bit-depth 10
 ```
 
-Custom presets can be put in a JSON file so repeat conversions do not need a
-long command line:
+For most repeated workflows, named presets are easier than file paths:
+
+```bash
+python bd2hevc.py preset save source-mix --quality source-ratio:0.60 --codec-source-ratio h264=0.55 --codec-source-ratio mpeg2video=0.30
+python bd2hevc.py auto "Disc" --preset source-mix
+```
+
+Preset JSON files are still supported when you want a version-controlled file:
 
 ```json
 {
