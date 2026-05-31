@@ -92,7 +92,8 @@ Preview what would be reencoded without writing an output:
 python bd2hevc.py auto "MY_DISC_BACKUP" --dry-run
 ```
 
-List clip ids, durations, codecs, and the quality BD2HEVC would use:
+List clip ids, durations, source codecs, planned output codecs, and the quality
+BD2HEVC would use:
 
 ```bash
 python bd2hevc.py clips "MY_DISC_BACKUP"
@@ -583,10 +584,21 @@ anchored around the common HEVC "same quality at roughly half the bitrate"
 target, then keeps a safety margin for one-pass hardware encoding and Blu-ray
 folder playback.
 
-MPEG-2 sources get codec-aware bitrate handling. When FFprobe reports a Blu-ray
+For clips that use different source codecs, `balanced`, `smaller`, and
+`transparent` all start from the same source-equivalent curve and then apply a
+codec adjustment:
+
+- AVC/H.264 uses the base curve.
+- MPEG-2 uses a lower HEVC/source factor because MPEG-2 is less efficient than
+  AVC at the same visual quality.
+- VC-1 uses an intermediate adjustment between AVC and MPEG-2.
+
+MPEG-2 sources also get bitrate-sanity handling. When FFprobe reports a Blu-ray
 MPEG-2 CPB ceiling instead of the actual clip bitrate, BD2HEVC falls back to the
 container bitrate minus known audio. The 10-second rule still applies: MPEG-2
-clips at or below 10 seconds are copied.
+clips at or below 10 seconds are copied. `source-ratio` and
+`source-ratio:0.62` intentionally use a fixed source-video multiplier, while
+`cq:N` uses CQ rate control instead of the bitrate curve.
 
 Presets:
 

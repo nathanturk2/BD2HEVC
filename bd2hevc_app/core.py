@@ -1578,6 +1578,17 @@ def planned_clip_quality_text(clip: dict[str, Any]) -> str:
     return str(mode)
 
 
+def planned_clip_output_codec(clip: dict[str, Any]) -> str | None:
+    video = clip.get("video") or {}
+    source_codec = video.get("codec_name")
+    action = clip.get("action")
+    if action == "reencode":
+        return "hevc"
+    if action in {"copy", "already_hevc"}:
+        return source_codec
+    return None
+
+
 def clip_list_rows(clips: list[dict[str, Any]], *, sort: str = "duration") -> list[dict[str, Any]]:
     if sort == "file":
         sorted_clips = sorted(clips, key=lambda item: str(item.get("file") or ""))
@@ -1594,6 +1605,8 @@ def clip_list_rows(clips: list[dict[str, Any]], *, sort: str = "duration") -> li
                 "planned_action": clip.get("action"),
                 "original_action": original_clip_action(clip),
                 "codec": video.get("codec_name"),
+                "source_codec": video.get("codec_name"),
+                "planned_codec": planned_clip_output_codec(clip),
                 "source_video_mbps": video.get("source_video_bitrate_mbps"),
                 "planned_quality": planned_clip_quality_text(clip),
             }
@@ -1602,15 +1615,16 @@ def clip_list_rows(clips: list[dict[str, Any]], *, sort: str = "duration") -> li
 
 
 def print_clip_list(rows: list[dict[str, Any]]) -> None:
-    print(f"{'clip':<12} {'duration':>8} {'action':<12} {'codec':<10} {'src Mbps':>8}  quality")
-    print(f"{'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 8}  {'-' * 24}")
+    print(f"{'clip':<12} {'duration':>8} {'action':<12} {'source':<10} {'output':<8} {'src Mbps':>8}  quality")
+    print(f"{'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 8} {'-' * 8}  {'-' * 24}")
     for row in rows:
         mbps_text = "" if row.get("source_video_mbps") is None else str(row.get("source_video_mbps"))
         print(
             f"{str(row.get('clip') or ''):<12} "
             f"{str(row.get('duration_text') or ''):>8} "
             f"{str(row.get('planned_action') or ''):<12} "
-            f"{str(row.get('codec') or ''):<10} "
+            f"{str(row.get('source_codec') or row.get('codec') or ''):<10} "
+            f"{str(row.get('planned_codec') or ''):<8} "
             f"{mbps_text:>8}  "
             f"{row.get('planned_quality') or ''}"
         )

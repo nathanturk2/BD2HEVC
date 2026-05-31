@@ -85,6 +85,8 @@
 - Added `clips` command to list M2TS clip ids, durations, codecs, source
   bitrates, and planned quality so users can choose clip-specific overrides
   without reading raw JSON.
+- `clips` now separates source codec from planned output codec so copied source
+  clips and HEVC replacements are easy to distinguish.
 - Added `--copy-clips` / `--exclude-clips` for preserving selected source clips
   untouched when a menu, game, or authored still-video clip should not be
   reencoded.

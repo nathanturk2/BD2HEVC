@@ -76,6 +76,28 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn('py bd2hevc.py diagnose "Converted UHD-BD', diagnose_help)
         self.assertIn("Default 5000", diagnose_help)
 
+    def test_clip_list_shows_source_and_planned_output_codec(self) -> None:
+        clips = [
+            {"file": "00001.m2ts", "action": "reencode", "duration": 60.0, "video": {"codec_name": "h264", "source_video_bitrate_mbps": 18.2, "target_hevc": {"mode": "balanced", "target_mbps": 9.8}}},
+            {"file": "00002.m2ts", "action": "copy", "duration": 5.0, "video": {"codec_name": "mpeg2video", "source_video_bitrate_mbps": 4.0}},
+        ]
+
+        rows = bd.clip_list_rows(clips, sort="file")
+
+        self.assertEqual(rows[0]["source_codec"], "h264")
+        self.assertEqual(rows[0]["planned_codec"], "hevc")
+        self.assertEqual(rows[1]["source_codec"], "mpeg2video")
+        self.assertEqual(rows[1]["planned_codec"], "mpeg2video")
+
+        with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+            bd.print_clip_list(rows)
+            table = buffer.getvalue()
+
+        self.assertIn("source", table)
+        self.assertIn("output", table)
+        self.assertIn("h264", table)
+        self.assertIn("hevc", table)
+
     def test_watch_lines_are_truncated_to_terminal_width(self) -> None:
         line = "Log: " + ("x" * 120)
         fitted = progress.fit_terminal_line(line, 40)
