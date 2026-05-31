@@ -553,6 +553,35 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(cq["cq"], 20)
         self.assertEqual(copy_spec["action"], "copy")
 
+    def test_quality_spec_supports_source_ratio_factor_and_legacy_presets(self) -> None:
+        ratio = bd.parse_quality_spec("source-ratio:0.62", option="--quality")
+        ratio_alias = bd.parse_quality_spec("0.55x", option="--quality")
+        anime = bd.parse_quality_spec("anime-cq18", option="--quality")
+        episode = bd.parse_quality_spec("episode-compact", option="--quality")
+
+        self.assertEqual(ratio["mode"], "source-ratio")
+        self.assertEqual(ratio["factor_override"], 0.62)
+        self.assertEqual(ratio_alias["factor_override"], 0.55)
+        self.assertEqual(anime["mode"], "compact-cq")
+        self.assertEqual(anime["cq"], 18)
+        self.assertEqual(episode["mode"], "compact-cq")
+
+    def test_quality_source_ratio_factor_sets_target_multiplier(self) -> None:
+        options = bd.quality_spec_bitrate_options({"mode": "balanced"}, bd.parse_quality_spec("ratio:0.62", option="--quality"))
+        plan = bd.equivalent_hevc_bitrate(
+            video_bps=20_000_000,
+            width=1920,
+            height=1080,
+            fps=23.976,
+            duration_seconds=120.0,
+            source_codec="h264",
+            **options,
+        )
+
+        self.assertEqual(options["mode"], "source-ratio")
+        self.assertEqual(options["factor_override"], 0.62)
+        self.assertEqual(plan["target_bps"], 12_400_000)
+
     def test_general_copy_with_top_n_cq_reencodes_only_longest(self) -> None:
         clips = [
             {

@@ -230,8 +230,9 @@ python bd2hevc.py queue "Anime Disc 1" "Anime Disc 2" --output-dir "Converted UH
 
 `--quality` is the general video policy for clips that BD2HEVC would normally
 reencode. It accepts bitrate presets (`smaller`, `balanced`, `transparent`,
-`source-ratio`, `compact-cq`), CQ values (`cq:18`, `cq:20`), or
-`copy`/`no-reencode`.
+`source-ratio`, `compact-cq`), explicit source ratios (`source-ratio:0.62`,
+`ratio:0.62`, or `0.62x`), CQ values (`cq:18`, `cq:20`), legacy preset names
+(`episode-compact`, `anime-cq18`), or `copy`/`no-reencode`.
 
 For storage-limited movie collections, you can spend more bits on the main
 feature while keeping extras compact:
@@ -280,6 +281,7 @@ Use any quality for the main title:
 
 ```bash
 python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality smaller --main-title-quality transparent
+python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality smaller --main-title-quality source-ratio:0.62
 ```
 
 Use any quality for the longest N clips:
@@ -292,6 +294,7 @@ Use CQ as a selector-specific override:
 
 ```bash
 python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality cq:20 --top-n-quality 3 cq:18
+python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality anime-cq18 --top-n-quality 3 cq:18
 ```
 
 Use copy/no-reencode as a quality choice. This example copies everything except
@@ -307,6 +310,7 @@ different handling:
 
 ```bash
 python bd2hevc.py auto "Disc" --clip-quality 00012 transparent
+python bd2hevc.py auto "Disc" --clip-quality 00012 source-ratio:0.62
 python bd2hevc.py auto "Disc" --clip-quality 00012 cq:20
 python bd2hevc.py auto "Disc" --clip-quality 00012 copy
 ```
@@ -591,7 +595,10 @@ python bd2hevc.py auto "Disc" --quality smaller
 python bd2hevc.py auto "Disc" --quality balanced
 python bd2hevc.py auto "Disc" --quality transparent
 python bd2hevc.py auto "Disc" --quality source-ratio
+python bd2hevc.py auto "Disc" --quality source-ratio:0.62
 python bd2hevc.py auto "Disc" --quality cq:20
+python bd2hevc.py auto "Disc" --quality episode-compact
+python bd2hevc.py auto "Disc" --quality anime-cq18
 ```
 
 The older bitrate flags are still available and are what preset JSON files use:
@@ -663,6 +670,7 @@ Manual controls:
 
 ```bash
 python bd2hevc.py auto "Disc" --hevc-bitrate-factor 0.62
+python bd2hevc.py auto "Disc" --quality source-ratio:0.62
 python bd2hevc.py auto "Disc" --min-video-bitrate 2500k --max-video-bitrate 60M
 python bd2hevc.py auto "Disc" --maxrate-multiplier 1.5 --bufsize-multiplier 2.0
 ```

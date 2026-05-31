@@ -56,6 +56,8 @@ from .config import (
     DEFAULT_VLC_COMPATIBILITY_MODE,
     HEVC_ENCODERS,
     KNOWN_VLC_COMPATIBILITY_FIXES,
+    LEGACY_ANIME_CQ_PRESET,
+    LEGACY_EPISODE_COMPACT_PRESET,
     MPEG2_SOURCE_CODECS,
     ROOT,
     SECONDS_REENCODE_THRESHOLD,
@@ -251,6 +253,16 @@ def validate_cq_value(value: Any, *, option: str) -> int:
     return cq_value
 
 
+def validate_factor_value(value: Any, *, option: str) -> float:
+    try:
+        factor = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolError(f"{option} must be a number greater than zero") from exc
+    if factor <= 0:
+        raise ToolError(f"{option} must be greater than zero")
+    return factor
+
+
 def parse_quality_spec(value: Any, *, option: str) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -263,6 +275,33 @@ def parse_quality_spec(value: Any, *, option: str) -> dict[str, Any] | None:
     if cq_match:
         cq_value = validate_cq_value(cq_match.group(1), option=option)
         return {"action": "reencode", "quality": f"cq:{cq_value}", "mode": ANIME_CQ_PRESET, "cq": cq_value}
+    if text == LEGACY_ANIME_CQ_PRESET:
+        return {
+            "action": "reencode",
+            "quality": LEGACY_ANIME_CQ_PRESET,
+            "mode": ANIME_CQ_PRESET,
+            "cq": ANIME_CQ_VALUE,
+            "legacy_preset": LEGACY_ANIME_CQ_PRESET,
+        }
+    if text == LEGACY_EPISODE_COMPACT_PRESET:
+        return {
+            "action": "reencode",
+            "quality": LEGACY_EPISODE_COMPACT_PRESET,
+            "mode": ANIME_CQ_PRESET,
+            "legacy_preset": LEGACY_EPISODE_COMPACT_PRESET,
+        }
+    ratio_match = (
+        re.fullmatch(r"(?:source-ratio|source_ratio|ratio|factor)[:=](\d+(?:\.\d+)?)", text)
+        or re.fullmatch(r"(\d+(?:\.\d+)?)x", text)
+    )
+    if ratio_match:
+        factor = validate_factor_value(ratio_match.group(1), option=option)
+        return {
+            "action": "reencode",
+            "quality": f"source-ratio:{factor:g}",
+            "mode": "source-ratio",
+            "factor_override": factor,
+        }
     mode = validate_bitrate_mode_value(text, option=option)
     return {"action": "reencode", "quality": mode, "mode": mode}
 
@@ -270,7 +309,10 @@ def parse_quality_spec(value: Any, *, option: str) -> dict[str, Any] | None:
 def quality_spec_bitrate_options(base_options: dict[str, Any] | None, spec: dict[str, Any]) -> dict[str, Any]:
     if spec.get("action") == "copy":
         return copy.deepcopy(base_options or {})
-    return override_bitrate_options(base_options, mode=spec.get("mode"), cq_value=spec.get("cq"))
+    options = override_bitrate_options(base_options, mode=spec.get("mode"), cq_value=spec.get("cq"))
+    if spec.get("factor_override") is not None:
+        options["factor_override"] = validate_factor_value(spec.get("factor_override"), option="quality factor")
+    return options
 
 
 def quality_spec_uses_cq(spec: dict[str, Any] | None) -> bool:
@@ -2201,7 +2243,7 @@ def cmd_queue(args: argparse.Namespace) -> int:
 
 
 def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--quality", default=None, help="General video handling for reencode-eligible clips. Accepts a bitrate preset, cq:N, or copy/no-reencode. Overrides --bitrate-mode when set.")
+    parser.add_argument("--quality", default=None, help="General video handling for reencode-eligible clips. Accepts a bitrate preset, cq:N, source-ratio:N, legacy presets such as anime-cq18/episode-compact, or copy/no-reencode. Overrides --bitrate-mode when set.")
     parser.add_argument("--bitrate-mode", choices=BITRATE_MODES, default="balanced", help="HEVC bitrate preset. balanced is the tested default; smaller saves more space; transparent spends more bitrate; source-ratio uses a fixed multiplier; compact-cq uses configurable CQ for reencoded clips. episode-compact and anime-cq18 are accepted as legacy aliases.")
     parser.add_argument("--bitrate-preset-file", default=None, help="Load bitrate settings from a JSON preset file. Non-default CLI options override preset fields.")
     parser.add_argument("--hevc-bitrate-factor", type=float, default=None, help="Override bitrate mode with a fixed HEVC/source video bitrate multiplier, e.g. 0.62.")
@@ -2211,13 +2253,13 @@ def add_bitrate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bufsize-multiplier", type=float, default=2.0, help="VBV buffer multiplier relative to maxrate.")
     parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for reencoded clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
     parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Defaults to the 10-second reencode threshold. Raise it if only episode/movie-length clips should use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
-    parser.add_argument("--main-title-quality", metavar="QUALITY", default=None, help="Quality for the longest reencode-eligible clip. Accepts a bitrate preset, cq:N, or copy/no-reencode. Mutually exclusive with top-N overrides.")
+    parser.add_argument("--main-title-quality", metavar="QUALITY", default=None, help="Quality for the longest reencode-eligible clip. Accepts a bitrate preset, cq:N, source-ratio:N, legacy presets, or copy/no-reencode. Mutually exclusive with top-N overrides.")
     parser.add_argument("--main-title-bitrate-mode", metavar="MODE", default=None, help="Legacy spelling for --main-title-quality MODE.")
     parser.add_argument("--main-title-cq", type=int, default=None, help="Use compact-cq at this CQ value for the longest reencoded clip. Lower is larger/higher quality; useful for CQ20 extras with a CQ18 main movie.")
-    parser.add_argument("--top-n-quality", nargs=2, metavar=("COUNT", "QUALITY"), default=None, help="Quality for the COUNT longest reencode-eligible clips. QUALITY accepts a bitrate preset, cq:N, or copy/no-reencode.")
+    parser.add_argument("--top-n-quality", nargs=2, metavar=("COUNT", "QUALITY"), default=None, help="Quality for the COUNT longest reencode-eligible clips. QUALITY accepts a bitrate preset, cq:N, source-ratio:N, legacy presets, or copy/no-reencode.")
     parser.add_argument("--top-n-bitrate-mode", nargs=2, metavar=("COUNT", "MODE"), default=None, help="Legacy spelling for --top-n-quality COUNT MODE.")
     parser.add_argument("--top-n-cq", nargs=2, type=int, metavar=("COUNT", "CQ"), default=None, help="Use compact-cq at this CQ value for the COUNT longest reencoded clips. Mutually exclusive with main-title overrides; useful for episode discs, e.g. --top-n-cq 3 18.")
-    parser.add_argument("--clip-quality", nargs=2, action="append", metavar=("CLIP", "QUALITY"), default=None, help="Quality for one named M2TS clip. QUALITY accepts a bitrate preset, cq:N, or copy/no-reencode. Can be repeated.")
+    parser.add_argument("--clip-quality", nargs=2, action="append", metavar=("CLIP", "QUALITY"), default=None, help="Quality for one named M2TS clip. QUALITY accepts a bitrate preset, cq:N, source-ratio:N, legacy presets, or copy/no-reencode. Can be repeated.")
     parser.add_argument("--clip-bitrate-mode", nargs=2, action="append", metavar=("CLIP", "MODE"), default=None, help="Legacy spelling for --clip-quality CLIP MODE. Can be repeated.")
     parser.add_argument("--clip-cq", nargs=2, action="append", metavar=("CLIP", "CQ"), default=None, help="Legacy spelling for --clip-quality CLIP cq:CQ. Can be repeated.")
     parser.add_argument("--copy-clips", "--exclude-clips", dest="copy_clips", nargs="+", action="append", default=None, metavar="CLIP", help="Copy named M2TS clips untouched instead of reencoding them. Accepts 00012 or 00012.m2ts. Can be repeated.")

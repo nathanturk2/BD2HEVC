@@ -80,7 +80,8 @@
   `--main-title-cq`.
 - Added unified quality selectors: `--quality`, `--main-title-quality`,
   `--top-n-quality`, and repeatable `--clip-quality`, with support for bitrate
-  presets, `cq:N`, and `copy`/`no-reencode`.
+  presets, explicit `source-ratio:N` factors, legacy compact presets, `cq:N`,
+  and `copy`/`no-reencode`.
 - Added `clips` command to list M2TS clip ids, durations, codecs, source
   bitrates, and planned quality so users can choose clip-specific overrides
   without reading raw JSON.
