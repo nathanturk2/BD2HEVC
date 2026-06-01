@@ -31,6 +31,7 @@ guaranteed.
 - [Quick Start](#quick-start)
 - [Background Jobs](#background-jobs)
 - [Quality And Audio Recipes](#quality-and-audio-recipes)
+- [UHD And Disc Size Targets](#uhd-and-disc-size-targets)
 - [Named Presets](#named-presets)
 - [Clip And Quality Overrides](#clip-and-quality-overrides)
 - [VLC Compatibility Fixes](#vlc-compatibility-fixes)
@@ -269,6 +270,47 @@ python bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality
 `--top-n-quality` and `--main-title-quality` are mutually exclusive. The older
 spellings `--bitrate-mode compact-cq --compact-cq-value 20`, `--main-title-cq
 18`, and `--top-n-cq 3 18` still work.
+
+## UHD And Disc Size Targets
+
+By default, full-disc outputs are patched toward UHD-BD folder conventions while
+remaining unencrypted folder backups. BD2HEVC creates the expected BDMV and
+CERTIFICATE folders when missing, mirrors required `BACKUP` files, and updates
+copied navigation version headers from Blu-ray `0200` style headers to `0300`
+where that is safe to do. It does not generate AACS/encryption material or
+guarantee standalone player compatibility.
+
+Disable that structural pass when you want the closest possible source-shaped
+folder:
+
+```bash
+python bd2hevc.py auto "Disc" --uhd-profile off
+```
+
+Patch an existing converted output without reencoding it:
+
+```bash
+python bd2hevc.py patch-uhd-profile "Converted UHD-BD/Movie Disc (BD) (UHD converted)"
+```
+
+For physical-disc experiments, use `--target-disc-size` with a VBR quality
+choice. This scales planned video bitrates to fit the requested budget, leaving
+a margin for filesystem and authoring overhead:
+
+```bash
+python bd2hevc.py auto "Disc" "Converted UHD-BD/Disc (BD) (UHD converted)" --quality source-ratio:0.60 --target-disc-size bd25
+python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --quality smaller --target-disc-size bd25 --target-disc-margin 0.96
+```
+
+Accepted sizes are `bd25`, `bd50`, `bd66`, `bd100`, or explicit sizes such as
+`23.5GB`. Disc-size fitting requires VBR targets (`balanced`, `smaller`,
+`transparent`, `source-ratio:N`, or the older bitrate-factor controls). It is
+not used with CQ (`cq:18`, `cq:20`, `compact-cq`) because CQ does not know its
+final size until after encoding.
+
+If you burn the folder to optical media, the filesystem still matters. Use a
+Blu-ray-capable authoring/burning tool that can write the correct UDF revision
+for BD/UHD-BD media; BD2HEVC only prepares the folder tree and stream metadata.
 
 ## Named Presets
 
@@ -626,6 +668,9 @@ bd2hevc tools
   HEVC.
 - Adjusts CLPI packet maps so VLC/libbluray does not follow stale packet
   positions from the larger source streams.
+- Applies the default UHD profile pass: required folder placeholders, backup
+  mirrors, and copied navigation version headers are brought closer to UHD-BD
+  folder conventions.
 - Generates missing disc-library metadata so VLC shows a normal title instead
   of a long `bluray:///...` path.
 - Applies known narrow BD-J compatibility fixes where BD2HEVC has an automated,
@@ -667,6 +712,19 @@ python bd2hevc.py auto "Disc" --quality source-ratio:0.60 --codec-source-ratio h
 
 Accepted codec aliases include `h264`, `avc`, `H.264`, `mpeg2`,
 `mpeg2video`, `vc1`, `VC-1`, and `wmv3`.
+
+When using VBR presets, `--target-disc-size` can apply one more scaling pass to
+the selected reencoded clips so the estimated full-disc output fits a physical
+disc budget:
+
+```bash
+python bd2hevc.py auto "Disc" --quality source-ratio:0.60 --target-disc-size bd25
+```
+
+This is a planning estimate, not a burning guarantee. It accounts for copied
+files, planned replacement video, passthrough or compact audio, and a safety
+margin. CQ modes are intentionally rejected for this option because their output
+size is discovered only after the encode finishes.
 
 Presets:
 
@@ -802,7 +860,12 @@ Well-supported in current testing:
 Known limits and watch areas:
 
 - BD2HEVC is not certified UHD-BD authoring software. The output is aimed at
-  local folder playback in VLC/libbluray-style players.
+  local folder playback in VLC/libbluray-style players. The default UHD profile
+  makes the folder tree and navigation headers more UHD-like, but it is still
+  not a licensed/encrypted UHD-BD authoring pipeline.
+- `--target-disc-size bd25` can make an estimated BD-25-sized output when VBR
+  quality settings are used, but physical-player playback also depends on the
+  burn, filesystem, player tolerance, and media.
 - Every BD-J disc can do unusual things. If a menu, gallery, or game behaves
   oddly, keep the source and output and run validation/probes before deleting
   anything.
@@ -828,6 +891,12 @@ Preview the repair plan:
 
 ```bash
 python bd2hevc.py repair-output "MY_DISC_BACKUP" "Converted UHD-BD/My Disc (BD) (UHD converted)" --dry-run
+```
+
+Apply only the UHD profile folder/header pass to older outputs:
+
+```bash
+python bd2hevc.py patch-uhd-profile "Converted UHD-BD/My Disc (BD) (UHD converted)"
 ```
 
 Run a headless VLC/libbluray smoke test without opening a visible video window:

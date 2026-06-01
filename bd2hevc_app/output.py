@@ -157,6 +157,15 @@ def print_conversion_summary(
             if len(clips) > 8:
                 preview += f", ... +{len(clips) - 8} more"
             print(f"First clips: {preview}")
+        disc_fit = result.get("target_disc_fit") or {}
+        if disc_fit:
+            fit_text = "scaled to fit" if disc_fit.get("scaled") else "already fits"
+            target = disc_fit.get("target_size")
+            estimated = disc_fit.get("estimated_after_bytes") or disc_fit.get("estimated_before_bytes")
+            if estimated:
+                print(f"Target disc size: {target} ({fit_text}, estimated {estimated / 1_000_000_000:.2f} GB)")
+            else:
+                print(f"Target disc size: {target} ({fit_text})")
         if report_path:
             print(f"Plan saved to: {report_path}")
         print("Run again without --dry-run to start the conversion.")
@@ -170,6 +179,15 @@ def print_conversion_summary(
         failed = [Path(v.get("output", "")).name for v in validation if not v.get("ok")]
         print(f"Reencoded clips: {len(reencoded)}")
         print("Clip validation: " + ("passed" if not failed else f"failed ({', '.join(failed[:8])})"))
+        disc_fit = result.get("target_disc_fit") or {}
+        if disc_fit:
+            fit_text = "scaled to fit" if disc_fit.get("scaled") else "already fit"
+            print(f"Target disc size: {disc_fit.get('target_size')} ({fit_text})")
+        uhd_structure = result.get("uhd_structure") or {}
+        if uhd_structure:
+            created = len(uhd_structure.get("created_dirs") or [])
+            version_patches = sum(1 for item in uhd_structure.get("version_patches") or [] if item.get("patched"))
+            print(f"UHD profile: applied ({created} folders created, {version_patches} version headers patched)")
         makemkv = result.get("makemkv_validation") or {}
         if makemkv.get("skipped"):
             print("MakeMKV validation: skipped")

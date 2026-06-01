@@ -10,7 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from bd2hevc_app import core as bd
-from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, muxing, navigation, output, presets, progress, queueing, repair, scan, tools, validation
+from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, muxing, navigation, output, presets, progress, queueing, repair, scan, tools, uhd, validation
 
 
 class ModuleSplitTests(unittest.TestCase):
@@ -74,6 +74,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIs(navigation.restore_source_clpi, bd.restore_source_clpi)
         self.assertIs(repair.select_output_repair_clips, bd.select_output_repair_clips)
         self.assertIs(repair.reencode_replacement_clip, bd.reencode_replacement_clip)
+        self.assertIs(uhd.ensure_uhd_backup_structure, bd.ensure_uhd_backup_structure)
         self.assertIs(progress.fit_terminal_line, bd.fit_terminal_line)
         self.assertIs(diagnostics.cmd_diagnose, bd.cmd_diagnose)
 
@@ -462,6 +463,62 @@ class BitratePresetTests(unittest.TestCase):
 
 
 class CopyPlanningTests(unittest.TestCase):
+    def test_uhd_structure_patches_versions_and_mirrors_required_backups(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "BDMV" / "BDJO").mkdir(parents=True)
+            (root / "BDMV" / "CLIPINF").mkdir(parents=True)
+            (root / "BDMV" / "PLAYLIST").mkdir(parents=True)
+            (root / "BDMV" / "index.bdmv").write_bytes(b"INDX0200payload")
+            (root / "BDMV" / "MovieObject.bdmv").write_bytes(b"MOBJ0200payload")
+            (root / "BDMV" / "BDJO" / "00000.bdjo").write_bytes(b"BDJO0200payload")
+            (root / "BDMV" / "CLIPINF" / "00001.clpi").write_bytes(b"HDMV0200payload")
+            (root / "BDMV" / "PLAYLIST" / "00001.mpls").write_bytes(b"MPLS0200payload")
+
+            report = bd.ensure_uhd_backup_structure(root)
+
+            self.assertEqual((root / "BDMV" / "index.bdmv").read_bytes()[:8], b"INDX0300")
+            self.assertEqual((root / "BDMV" / "MovieObject.bdmv").read_bytes()[:8], b"MOBJ0300")
+            self.assertEqual((root / "BDMV" / "BDJO" / "00000.bdjo").read_bytes()[:8], b"BDJO0300")
+            self.assertEqual((root / "BDMV" / "CLIPINF" / "00001.clpi").read_bytes()[:8], b"HDMV0300")
+            self.assertEqual((root / "BDMV" / "PLAYLIST" / "00001.mpls").read_bytes()[:8], b"MPLS0300")
+            self.assertTrue((root / "BDMV" / "BACKUP" / "index.bdmv").exists())
+            self.assertTrue((root / "BDMV" / "BACKUP" / "MovieObject.bdmv").exists())
+            self.assertTrue((root / "BDMV" / "BACKUP" / "CLIPINF" / "00001.clpi").exists())
+            self.assertTrue((root / "BDMV" / "BACKUP" / "PLAYLIST" / "00001.mpls").exists())
+            self.assertTrue((root / "CERTIFICATE" / "BACKUP").is_dir())
+            self.assertFalse(report["certificate"]["id_bdmv_exists"])
+
+    def test_disc_size_fit_scales_vbr_targets(self) -> None:
+        with TemporaryDirectory() as temp:
+            source = Path(temp)
+            stream = source / "BDMV" / "STREAM"
+            stream.mkdir(parents=True)
+            (stream / "00001.m2ts").write_bytes(b"x" * 2_000_000)
+            (source / "BDMV" / "index.bdmv").write_bytes(b"INDX0200")
+            clip = {
+                "file": "00001.m2ts",
+                "action": "reencode",
+                "duration": 10.0,
+                "video": {
+                    "source_video_bitrate": 1_200_000,
+                    "target_hevc": {
+                        "target_bps": 800_000,
+                        "target_mbps": 0.8,
+                        "maxrate_multiplier": 1.55,
+                        "bufsize_multiplier": 2.0,
+                        "reason": "test",
+                    },
+                },
+                "audio": [{"channels": 2}],
+            }
+
+            report = bd.fit_reencoded_clips_to_disc_size(source, [clip], target_size=1_200_000, margin=1.0)
+
+            self.assertTrue(report["scaled"])
+            self.assertLess(clip["video"]["target_hevc"]["target_bps"], 800_000)
+            self.assertIn("disc-size fit", clip["video"]["target_hevc"]["reason"])
+
     def test_disc_title_normalizer_preserves_acronyms_and_roman_numerals(self) -> None:
         self.assertEqual(output.disc_title_from_folder_name("BACK_TO_THE_FUTURE_PART_II"), "Back to the Future Part II")
         self.assertEqual(output.disc_title_from_folder_name("BBC_PRIDE_AND_PREJUDICE"), "BBC Pride and Prejudice")

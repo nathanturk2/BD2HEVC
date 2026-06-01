@@ -143,6 +143,11 @@ from .tools import (
     run_cmd,
     selected_hevc_encoder,
 )
+from .uhd import (
+    DISC_SIZE_BYTES,
+    ensure_uhd_backup_structure,
+    fit_reencoded_clips_to_disc_size,
+)
 from .validation import (
     ffprobe_bluray_playlist,
     validate_bluray_playlist,
@@ -1029,6 +1034,7 @@ def clone_streams_plan_payload(
     *,
     quality_overrides: dict[str, Any] | None = None,
     copy_clip_overrides: dict[str, Any] | None = None,
+    target_disc_fit: dict[str, Any] | None = None,
     planning_pending: bool = False,
 ) -> dict[str, Any]:
     return {
@@ -1048,6 +1054,8 @@ def clone_streams_plan_payload(
             "stereo_bitrate": stereo_audio_bitrate_from_args(args),
             "mono_bitrate": mono_audio_bitrate_from_args(args),
         },
+        "target_disc_fit": target_disc_fit,
+        "uhd_profile": getattr(args, "uhd_profile", "auto"),
         "patch_navigation": args.patch_navigation,
         "bdj_compatibility_patches": bool(getattr(args, "bdj_compatibility_patches", False)),
         "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
@@ -1359,6 +1367,13 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     main_title_cq_override = (quality_overrides or {}).get("main_title_cq")
     top_n_cq_override = (quality_overrides or {}).get("top_n_cq")
     copy_clip_overrides = apply_clip_copy_overrides(scan.get("clips", []), getattr(args, "copy_clips", None))
+    disc_fit = fit_reencoded_clips_to_disc_size(
+        source,
+        scan.get("clips", []),
+        target_size=getattr(args, "target_disc_size", None),
+        margin=getattr(args, "target_disc_margin", 0.98),
+        audio_mode=audio_mode_from_args(args),
+    )
     clips = [c for c in scan.get("clips", []) if c.get("action") == "reencode"]
     progress_plan_path = path_or_none(getattr(args, "progress_plan", None))
     plan_payload = clone_streams_plan_payload(
@@ -1371,6 +1386,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         clips,
         quality_overrides=quality_overrides,
         copy_clip_overrides=copy_clip_overrides,
+        target_disc_fit=disc_fit,
     )
     if progress_plan_path:
         progress_plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1440,6 +1456,9 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     )
     if args.patch_navigation:
         navigation_patch = patch_navigation_for_hevc(output, [clip["file"] for clip in clips], tools=tools, source_root=source)
+    uhd_structure = None
+    if getattr(args, "uhd_profile", "auto") != "off":
+        uhd_structure = ensure_uhd_backup_structure(output)
     bdj_compatibility_patch = None
     selected_vlc_fixes = compatibility_fix_names_from_args(args)
     custom_patch_files = custom_compatibility_patch_files_from_args(args)
@@ -1474,6 +1493,8 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
             "mono_bitrate": mono_audio_bitrate_from_args(args),
         },
         "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
+        "target_disc_fit": disc_fit,
+        "uhd_structure": uhd_structure,
         "vlc_fixes": selected_vlc_fixes,
         "custom_compatibility_patch_files": [str(path) for path in custom_patch_files],
         "encode_ahead": encode_ahead,
@@ -1806,6 +1827,32 @@ def cmd_patch_disc_metadata(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_patch_uhd_profile(args: argparse.Namespace) -> int:
+    roots = find_disc_roots([Path(p) for p in args.paths])
+    if not roots:
+        raise ToolError("No BDMV backups found")
+    reports = [ensure_uhd_backup_structure(root) for root in roots]
+    payload = {"patched": reports}
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print("BD2HEVC UHD profile patch complete")
+        for report in reports:
+            root = report.get("root")
+            created = len(report.get("created_dirs") or [])
+            version_patches = sum(1 for item in report.get("version_patches") or [] if item.get("patched"))
+            missing = report.get("missing_required_files") or []
+            print(f"Output: {root}")
+            print(f"  Created folders: {created}")
+            print(f"  Patched version headers: {version_patches}")
+            if missing:
+                print("  Missing required files: " + ", ".join(missing))
+            cert = report.get("certificate") or {}
+            if not cert.get("id_bdmv_exists"):
+                print("  Certificate id.bdmv: missing (not generated)")
+    return 0
+
+
 def cmd_patch_navigation(args: argparse.Namespace) -> int:
     tools = discover_tools()
     target = Path(args.target).resolve()
@@ -2015,6 +2062,7 @@ def cmd_repair_output(args: argparse.Namespace) -> int:
             report["backup_clpi"] = str(backup_clpi)
         reports.append(report)
     navigation_patch = patch_navigation_for_hevc(output_root, clip_names, tools=tools, source_root=source_root) if clip_names else None
+    uhd_structure = ensure_uhd_backup_structure(output_root)
     payload = {
         "source": str(source_root),
         "output": str(output_root),
@@ -2024,6 +2072,7 @@ def cmd_repair_output(args: argparse.Namespace) -> int:
         "selected": selected,
         "reports": reports,
         "navigation_patch": navigation_patch,
+        "uhd_structure": uhd_structure,
         "ok": all(item.get("ok") for item in reports),
     }
     if getattr(args, "json", False):
@@ -2308,6 +2357,13 @@ def add_audio_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mono-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_MONO_AUDIO_BITRATE, help="Bitrate for compact-stereo mono AC-3 audio. Default 128k.")
 
 
+def add_uhd_output_args(parser: argparse.ArgumentParser) -> None:
+    sizes = ", ".join(DISC_SIZE_BYTES)
+    parser.add_argument("--uhd-profile", choices=["auto", "off"], default="auto", help="Patch output structure toward UHD-BD folder conventions: UHD navigation versions, backup mirrors, and required folder placeholders. Default auto.")
+    parser.add_argument("--target-disc-size", default=None, metavar="SIZE", help=f"Scale VBR video targets to fit a physical-disc budget. Accepts {sizes}, or a size such as 23.5GB. Requires VBR targets, not CQ.")
+    parser.add_argument("--target-disc-margin", type=float, default=0.98, help="Safety margin for --target-disc-size. Default 0.98 leaves room for filesystem/authoring overhead.")
+
+
 def add_makemkv_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--makemkv", action="store_true", help="Use MakeMKV title scanning/validation for folder backups. Disabled by default to avoid probing physical optical drives.")
     parser.add_argument("--no-makemkv", action="store_true", help="Skip MakeMKV title scanning/validation. Conversion still uses FFprobe/FFmpeg/tsMuxer.")
@@ -2438,6 +2494,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_encoder_args(p_auto, include_encode_ahead=True)
     add_bitrate_args(p_auto)
     add_audio_args(p_auto)
+    add_uhd_output_args(p_auto)
     p_auto.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
     p_auto.add_argument("--progress-plan", default=None, help=argparse.SUPPRESS)
     p_auto.add_argument("--staging-dir", default=None)
@@ -2468,6 +2525,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_encoder_args(p_start, include_encode_ahead=True)
     add_bitrate_args(p_start)
     add_audio_args(p_start)
+    add_uhd_output_args(p_start)
     p_start.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
     p_start.add_argument("--force", action="store_true", help="Replace an existing output folder.")
     add_makemkv_args(p_start)
@@ -2494,6 +2552,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_encoder_args(p_queue, include_encode_ahead=True)
     add_bitrate_args(p_queue)
     add_audio_args(p_queue)
+    add_uhd_output_args(p_queue)
     p_queue.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
     p_queue.add_argument("--force", action="store_true", help="Replace existing output folders.")
     add_makemkv_args(p_queue)
@@ -2614,6 +2673,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_metadata.add_argument("--title", default=None, help="Use this title for every patched disc. Defaults to a cleaned folder name.")
     p_metadata.add_argument("--force", action="store_true", help="Overwrite existing bdmt_*.xml metadata.")
     p_metadata.set_defaults(func=cmd_patch_disc_metadata)
+
+    p_uhd_profile = command_parser(sub, "patch-uhd-profile", help="Patch an existing output toward UHD-BD folder conventions.", description="Create expected UHD-BD-style folders, mirror required backup files, and update copied Blu-ray navigation version headers where applicable.", examples="""
+  py bd2hevc.py patch-uhd-profile "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py patch-uhd-profile "Converted UHD-BD"
+  py bd2hevc.py patch-uhd-profile "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --json
+""")
+    p_uhd_profile.add_argument("paths", nargs="+", help="Disc folders or a parent folder containing disc folders.")
+    p_uhd_profile.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_uhd_profile.set_defaults(func=cmd_patch_uhd_profile)
 
     p_patch = command_parser(sub, "patch-navigation", help="Patch full-disc CLPI/MPLS descriptors for HEVC replacement clips.", description="Patch Blu-ray navigation metadata after HEVC replacement so players see the new video streams correctly.", examples="""
   py bd2hevc.py patch-navigation "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --reference "BD backups\\Movie Disc"
