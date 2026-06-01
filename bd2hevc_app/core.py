@@ -363,6 +363,17 @@ def args_request_cq_quality(args: argparse.Namespace, *, general_options: dict[s
     return False
 
 
+def normalize_uhd_profile(value: Any) -> str:
+    text = str(value or "library").strip().lower()
+    if text in {"", "auto", "library", "digital"}:
+        return "library"
+    if text in {"disc", "physical", "bd25", "bd-r", "bdr"}:
+        return "disc"
+    if text == "off":
+        return "library"
+    raise ToolError("--uhd-profile must be library or disc")
+
+
 def bitrate_options_for_args(args: argparse.Namespace) -> dict[str, Any]:
     options = bitrate_options_from_args(args)
     spec = parse_quality_spec(getattr(args, "quality", None), option="--quality")
@@ -562,6 +573,14 @@ def validate_encoder_bitrate_compatibility(args: argparse.Namespace) -> None:
     encoder = selected_hevc_encoder(args)
     options = bitrate_options_for_args(args)
     mode = normalize_bitrate_mode(str(options.get("mode") or "balanced"))
+    if normalize_uhd_profile(getattr(args, "uhd_profile", "library")) == "disc":
+        if not getattr(args, "target_disc_size", None):
+            raise ToolError("--uhd-profile disc requires --target-disc-size bd25, bd50, bd66, bd100, or an explicit size.")
+        if args_request_cq_quality(args, general_options=options) and not options.get("factor_override"):
+            raise ToolError(
+                "--uhd-profile disc requires predictable VBR sizing, so CQ/compact-cq is not allowed.\n"
+                "Use --quality balanced, smaller, transparent, source-ratio:N, or codec-specific source ratios."
+            )
     if encoder == "hevc_qsv" and args_request_cq_quality(args, general_options=options) and not options.get("factor_override"):
         raise ToolError(
             "compact-cq uses CQ rate control, but BD2HEVC does not currently support compact-cq with --encoder hevc_qsv.\n"
@@ -1055,7 +1074,8 @@ def clone_streams_plan_payload(
             "mono_bitrate": mono_audio_bitrate_from_args(args),
         },
         "target_disc_fit": target_disc_fit,
-        "uhd_profile": getattr(args, "uhd_profile", "auto"),
+        "uhd_profile": normalize_uhd_profile(getattr(args, "uhd_profile", "library")),
+        "uhd_structure": "always",
         "patch_navigation": args.patch_navigation,
         "bdj_compatibility_patches": bool(getattr(args, "bdj_compatibility_patches", False)),
         "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
@@ -1456,9 +1476,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     )
     if args.patch_navigation:
         navigation_patch = patch_navigation_for_hevc(output, [clip["file"] for clip in clips], tools=tools, source_root=source)
-    uhd_structure = None
-    if getattr(args, "uhd_profile", "auto") != "off":
-        uhd_structure = ensure_uhd_backup_structure(output)
+    uhd_structure = ensure_uhd_backup_structure(output)
     bdj_compatibility_patch = None
     selected_vlc_fixes = compatibility_fix_names_from_args(args)
     custom_patch_files = custom_compatibility_patch_files_from_args(args)
@@ -1494,6 +1512,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         },
         "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
         "target_disc_fit": disc_fit,
+        "uhd_profile": normalize_uhd_profile(getattr(args, "uhd_profile", "library")),
         "uhd_structure": uhd_structure,
         "vlc_fixes": selected_vlc_fixes,
         "custom_compatibility_patch_files": [str(path) for path in custom_patch_files],
@@ -2359,7 +2378,7 @@ def add_audio_args(parser: argparse.ArgumentParser) -> None:
 
 def add_uhd_output_args(parser: argparse.ArgumentParser) -> None:
     sizes = ", ".join(DISC_SIZE_BYTES)
-    parser.add_argument("--uhd-profile", choices=["auto", "off"], default="auto", help="Patch output structure toward UHD-BD folder conventions: UHD navigation versions, backup mirrors, and required folder placeholders. Default auto.")
+    parser.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="Output profile. library is the normal digital-library mode and still applies the UHD-like folder/header structure. disc adds physical-disc guardrails and requires --target-disc-size with VBR quality. auto/off are legacy aliases for library.")
     parser.add_argument("--target-disc-size", default=None, metavar="SIZE", help=f"Scale VBR video targets to fit a physical-disc budget. Accepts {sizes}, or a size such as 23.5GB. Requires VBR targets, not CQ.")
     parser.add_argument("--target-disc-margin", type=float, default=0.98, help="Safety margin for --target-disc-size. Default 0.98 leaves room for filesystem/authoring overhead.")
 

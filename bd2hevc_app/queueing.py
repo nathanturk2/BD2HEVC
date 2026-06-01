@@ -336,7 +336,7 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--audio-mode", getattr(args, "audio_mode", DEFAULT_AUDIO_MODE), DEFAULT_AUDIO_MODE)
     append_option(argv, "--stereo-audio-bitrate", getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE), DEFAULT_STEREO_AUDIO_BITRATE)
     append_option(argv, "--mono-audio-bitrate", getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE), DEFAULT_MONO_AUDIO_BITRATE)
-    append_option(argv, "--uhd-profile", getattr(args, "uhd_profile", "auto"), "auto")
+    append_option(argv, "--uhd-profile", getattr(args, "uhd_profile", "library"), "library")
     append_option(argv, "--target-disc-size", getattr(args, "target_disc_size", None))
     append_option(argv, "--target-disc-margin", getattr(args, "target_disc_margin", 0.98), 0.98)
     append_option(argv, "--vlc-compat", getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE), DEFAULT_VLC_COMPATIBILITY_MODE)

@@ -98,10 +98,13 @@
 - Added named preset management with `preset save/list/show/remove` and
   `--preset NAME`, so common quality/audio profiles can be created, reused, and
   removed without manually editing or remembering JSON file paths.
-- Added a default UHD profile pass that creates expected BDMV/CERTIFICATE
-  folder placeholders, mirrors required backup navigation files, and patches
-  copied navigation version headers toward UHD-BD conventions. Existing outputs
-  can be updated with `patch-uhd-profile`.
+- Added an always-on UHD-like structure pass that creates expected
+  BDMV/CERTIFICATE folder placeholders, mirrors required backup navigation
+  files, and patches copied navigation version headers toward UHD-BD
+  conventions. Existing outputs can be updated with `patch-uhd-profile`.
+- Changed `--uhd-profile` into an intent/guardrail selector: `library` is the
+  normal digital-library default, while `disc` requires a target disc size and
+  predictable VBR quality.
 - Added `--target-disc-size` and `--target-disc-margin` so VBR conversions can
   scale planned replacement-video bitrates toward BD-25/BD-50/BD-66/BD-100 or
   explicit byte budgets.

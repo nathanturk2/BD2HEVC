@@ -880,6 +880,68 @@ class CommandConstructionTests(unittest.TestCase):
         with self.assertRaisesRegex(bd.ToolError, "compact-cq.*hevc_qsv"):
             bd.validate_encoder_bitrate_compatibility(args)
 
+    def test_uhd_disc_profile_requires_target_size(self) -> None:
+        args = argparse.Namespace(
+            encoder="hevc_nvenc",
+            bitrate_preset_file=None,
+            bitrate_mode="balanced",
+            hevc_bitrate_factor=None,
+            uhd_profile="disc",
+            target_disc_size=None,
+        )
+
+        with self.assertRaisesRegex(bd.ToolError, "--uhd-profile disc requires --target-disc-size"):
+            bd.validate_encoder_bitrate_compatibility(args)
+
+    def test_uhd_disc_profile_rejects_cq_quality(self) -> None:
+        args = argparse.Namespace(
+            encoder="hevc_nvenc",
+            bitrate_preset_file=None,
+            bitrate_mode="balanced",
+            hevc_bitrate_factor=None,
+            quality="cq:20",
+            main_title_quality=None,
+            main_title_cq=None,
+            main_title_bitrate_mode=None,
+            top_n_quality=None,
+            top_n_cq=None,
+            top_n_bitrate_mode=None,
+            clip_quality=None,
+            clip_bitrate_mode=None,
+            clip_cq=None,
+            uhd_profile="disc",
+            target_disc_size="bd25",
+        )
+
+        with self.assertRaisesRegex(bd.ToolError, "CQ/compact-cq is not allowed"):
+            bd.validate_encoder_bitrate_compatibility(args)
+
+    def test_uhd_disc_profile_accepts_vbr_target_size(self) -> None:
+        args = argparse.Namespace(
+            encoder="hevc_nvenc",
+            bitrate_preset_file=None,
+            bitrate_mode="balanced",
+            hevc_bitrate_factor=None,
+            quality="smaller",
+            main_title_quality=None,
+            main_title_cq=None,
+            main_title_bitrate_mode=None,
+            top_n_quality=[3, "balanced"],
+            top_n_cq=None,
+            top_n_bitrate_mode=None,
+            clip_quality=None,
+            clip_bitrate_mode=None,
+            clip_cq=None,
+            uhd_profile="disc",
+            target_disc_size="bd25",
+        )
+
+        bd.validate_encoder_bitrate_compatibility(args)
+
+    def test_legacy_uhd_profile_values_alias_library(self) -> None:
+        self.assertEqual(bd.normalize_uhd_profile("auto"), "library")
+        self.assertEqual(bd.normalize_uhd_profile("off"), "library")
+
     def test_clip_overrides_reject_unknown_clip(self) -> None:
         with self.assertRaisesRegex(bd.ToolError, "unknown clip"):
             bd.apply_clip_copy_overrides([{"file": "00001.m2ts", "action": "reencode"}], [["00002"]])

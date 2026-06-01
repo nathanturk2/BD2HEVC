@@ -273,19 +273,20 @@ spellings `--bitrate-mode compact-cq --compact-cq-value 20`, `--main-title-cq
 
 ## UHD And Disc Size Targets
 
-By default, full-disc outputs are patched toward UHD-BD folder conventions while
+Full-disc outputs always get the UHD-like folder/header normalization pass while
 remaining unencrypted folder backups. BD2HEVC creates the expected BDMV and
 CERTIFICATE folders when missing, mirrors required `BACKUP` files, and updates
 copied navigation version headers from Blu-ray `0200` style headers to `0300`
-where that is safe to do. It does not generate AACS/encryption material or
-guarantee standalone player compatibility.
+where that is safe to do. This is part of the normal digital-library workflow,
+not a claim that the result is a licensed/encrypted UHD-BD.
 
-Disable that structural pass when you want the closest possible source-shaped
-folder:
+`--uhd-profile` is reserved for intent and guardrails:
 
-```bash
-python bd2hevc.py auto "Disc" --uhd-profile off
-```
+- `--uhd-profile library` is the default. It is for normal VLC/libbluray folder
+  playback and still applies the UHD-like structure.
+- `--uhd-profile disc` is for physical-disc experiments. It requires
+  `--target-disc-size` and rejects CQ/compact-CQ settings because CQ cannot know
+  the final size before encoding.
 
 Patch an existing converted output without reencoding it:
 
@@ -298,8 +299,8 @@ choice. This scales planned video bitrates to fit the requested budget, leaving
 a margin for filesystem and authoring overhead:
 
 ```bash
-python bd2hevc.py auto "Disc" "Converted UHD-BD/Disc (BD) (UHD converted)" --quality source-ratio:0.60 --target-disc-size bd25
-python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --quality smaller --target-disc-size bd25 --target-disc-margin 0.96
+python bd2hevc.py auto "Disc" "Converted UHD-BD/Disc (BD) (UHD converted)" --uhd-profile disc --quality source-ratio:0.60 --target-disc-size bd25
+python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --uhd-profile disc --quality smaller --target-disc-size bd25 --target-disc-margin 0.96
 ```
 
 Accepted sizes are `bd25`, `bd50`, `bd66`, `bd100`, or explicit sizes such as
@@ -668,9 +669,9 @@ bd2hevc tools
   HEVC.
 - Adjusts CLPI packet maps so VLC/libbluray does not follow stale packet
   positions from the larger source streams.
-- Applies the default UHD profile pass: required folder placeholders, backup
-  mirrors, and copied navigation version headers are brought closer to UHD-BD
-  folder conventions.
+- Applies the always-on UHD-like structure pass: required folder placeholders,
+  backup mirrors, and copied navigation version headers are brought closer to
+  UHD-BD folder conventions.
 - Generates missing disc-library metadata so VLC shows a normal title instead
   of a long `bluray:///...` path.
 - Applies known narrow BD-J compatibility fixes where BD2HEVC has an automated,
@@ -718,7 +719,7 @@ the selected reencoded clips so the estimated full-disc output fits a physical
 disc budget:
 
 ```bash
-python bd2hevc.py auto "Disc" --quality source-ratio:0.60 --target-disc-size bd25
+python bd2hevc.py auto "Disc" --uhd-profile disc --quality source-ratio:0.60 --target-disc-size bd25
 ```
 
 This is a planning estimate, not a burning guarantee. It accounts for copied
@@ -860,9 +861,9 @@ Well-supported in current testing:
 Known limits and watch areas:
 
 - BD2HEVC is not certified UHD-BD authoring software. The output is aimed at
-  local folder playback in VLC/libbluray-style players. The default UHD profile
-  makes the folder tree and navigation headers more UHD-like, but it is still
-  not a licensed/encrypted UHD-BD authoring pipeline.
+  local folder playback in VLC/libbluray-style players. The always-on structure
+  pass makes the folder tree and navigation headers more UHD-like, but it is
+  still not a licensed/encrypted UHD-BD authoring pipeline.
 - `--target-disc-size bd25` can make an estimated BD-25-sized output when VBR
   quality settings are used, but physical-player playback also depends on the
   burn, filesystem, player tolerance, and media.
