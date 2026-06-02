@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from .config import (
     SPARSE_TIMING_MIN_GAP_SECONDS,
     SPARSE_TIMING_MIN_RATIO,
 )
-from .tools import ToolError, require_tool, run_cmd
+from .tools import ToolError, hidden_process_kwargs, require_tool, run_cmd
 
 
 def find_disc_roots(paths: list[Path]) -> list[Path]:
@@ -236,6 +237,273 @@ def sum_video_packet_bytes(path: Path, tools: dict[str, Any], *, video_selector:
     return total
 
 
+def annexb_start_code(data: bytes, start: int = 0) -> tuple[int, int] | None:
+    three = data.find(b"\x00\x00\x01", start)
+    four = data.find(b"\x00\x00\x00\x01", start)
+    if three < 0 and four < 0:
+        return None
+    if four >= 0 and (three < 0 or four <= three):
+        return four, 4
+    return three, 3
+
+
+def count_h264_filler_bytes_in_annexb(data: bytes) -> tuple[int, int]:
+    filler_bytes = 0
+    filler_nals = 0
+    first = annexb_start_code(data)
+    while first is not None:
+        start, start_len = first
+        next_start = annexb_start_code(data, start + start_len)
+        end = next_start[0] if next_start else len(data)
+        nal = data[start:end]
+        if len(nal) > start_len and (nal[start_len] & 0x1F) == 12:
+            filler_bytes += len(nal)
+            filler_nals += 1
+        if next_start is None:
+            break
+        first = next_start
+    return filler_bytes, filler_nals
+
+
+def count_hevc_filler_bytes_in_annexb(data: bytes) -> tuple[int, int]:
+    filler_bytes = 0
+    filler_nals = 0
+    first = annexb_start_code(data)
+    while first is not None:
+        start, start_len = first
+        next_start = annexb_start_code(data, start + start_len)
+        end = next_start[0] if next_start else len(data)
+        nal = data[start:end]
+        if len(nal) > start_len + 1 and ((nal[start_len] >> 1) & 0x3F) == 38:
+            filler_bytes += len(nal)
+            filler_nals += 1
+        if next_start is None:
+            break
+        first = next_start
+    return filler_bytes, filler_nals
+
+
+def count_vc1_stuffing_bytes_in_annexb(data: bytes) -> tuple[int, int]:
+    stuffing_bytes = 0
+    stuffing_runs = 0
+    start = 0
+    while True:
+        marker = data.find(b"\x00\x00\x01", start)
+        if marker < 0:
+            break
+        zeros = 0
+        cursor = marker - 1
+        while cursor >= 0 and data[cursor] == 0:
+            zeros += 1
+            cursor -= 1
+        if zeros:
+            stuffing_bytes += zeros
+            stuffing_runs += 1
+        start = marker + 3
+    return stuffing_bytes, stuffing_runs
+
+
+def count_start_coded_filler_bytes(
+    path: Path,
+    tools: dict[str, Any],
+    *,
+    output_format: str,
+    unit_is_filler: Any,
+    video_selector: str = "v:0",
+) -> dict[str, Any]:
+    ffmpeg = require_tool(tools, "ffmpeg")
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-map",
+        f"0:{video_selector}",
+        "-c:v",
+        "copy",
+        "-f",
+        output_format,
+        "-",
+    ]
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **hidden_process_kwargs(),
+    )
+    assert process.stdout is not None
+    buffer = b""
+    filler_bytes = 0
+    filler_units = 0
+
+    def consume(final: bool = False) -> None:
+        nonlocal buffer, filler_bytes, filler_units
+        while True:
+            first = annexb_start_code(buffer)
+            if first is None:
+                buffer = buffer[-4:]
+                return
+            start, start_len = first
+            if start > 0:
+                buffer = buffer[start:]
+                start = 0
+            next_start = annexb_start_code(buffer, start + start_len)
+            if next_start is None:
+                if final:
+                    nal = buffer
+                    if unit_is_filler(nal, start_len):
+                        filler_bytes += len(nal)
+                        filler_units += 1
+                    buffer = b""
+                return
+            end = next_start[0]
+            nal = buffer[:end]
+            if unit_is_filler(nal, start_len):
+                filler_bytes += len(nal)
+                filler_units += 1
+            buffer = buffer[end:]
+
+    for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
+        buffer += chunk
+        consume()
+    stderr_bytes = process.stderr.read() if process.stderr else b""
+    returncode = process.wait()
+    consume(final=True)
+    if returncode != 0:
+        stderr = stderr_bytes.decode(errors="replace")
+        raise ToolError(f"Could not scan {output_format} filler data in {path.name}:\n{stderr}")
+    return {"padding_bytes": filler_bytes, "padding_units": filler_units}
+
+
+def count_h264_filler_bytes(path: Path, tools: dict[str, Any], *, video_selector: str = "v:0") -> dict[str, Any]:
+    result = count_start_coded_filler_bytes(
+        path,
+        tools,
+        output_format="h264",
+        video_selector=video_selector,
+        unit_is_filler=lambda nal, start_len: len(nal) > start_len and (nal[start_len] & 0x1F) == 12,
+    )
+    return {
+        "padding_bytes": result["padding_bytes"],
+        "padding_units": result["padding_units"],
+        "filler_bytes": result["padding_bytes"],
+        "filler_nals": result["padding_units"],
+        "padding_kind": "h264_filler_nal",
+    }
+
+
+def count_hevc_filler_bytes(path: Path, tools: dict[str, Any], *, video_selector: str = "v:0") -> dict[str, Any]:
+    result = count_start_coded_filler_bytes(
+        path,
+        tools,
+        output_format="hevc",
+        video_selector=video_selector,
+        unit_is_filler=lambda nal, start_len: len(nal) > start_len + 1 and ((nal[start_len] >> 1) & 0x3F) == 38,
+    )
+    result["padding_kind"] = "hevc_filler_nal"
+    return result
+
+
+def count_vc1_stuffing_bytes(path: Path, tools: dict[str, Any], *, video_selector: str = "v:0") -> dict[str, Any]:
+    ffmpeg = require_tool(tools, "ffmpeg")
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-map",
+        f"0:{video_selector}",
+        "-c:v",
+        "copy",
+        "-f",
+        "vc1",
+        "-",
+    ]
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **hidden_process_kwargs(),
+    )
+    assert process.stdout is not None
+    pending_zeros = 0
+    stuffing_bytes = 0
+    stuffing_runs = 0
+
+    def consume(data: bytes, *, final: bool = False) -> None:
+        nonlocal pending_zeros, stuffing_bytes, stuffing_runs
+        if not data:
+            return
+        offset = 0
+        if pending_zeros:
+            leading = 0
+            while leading < len(data) and data[leading] == 0:
+                leading += 1
+            if leading == len(data):
+                pending_zeros += leading
+                return
+            if data[leading] == 1 and pending_zeros + leading >= 2:
+                extra = pending_zeros + leading - 2
+                if extra > 0:
+                    stuffing_bytes += extra
+                    stuffing_runs += 1
+                offset = leading + 1
+            else:
+                offset = leading
+            pending_zeros = 0
+        search_data = data[offset:]
+        start = 0
+        while True:
+            marker = search_data.find(b"\x00\x00\x01", start)
+            if marker < 0:
+                break
+            zero_count = 2
+            cursor = marker - 1
+            while cursor >= 0 and search_data[cursor] == 0:
+                zero_count += 1
+                cursor -= 1
+            extra = zero_count - 2
+            if extra > 0:
+                stuffing_bytes += extra
+                stuffing_runs += 1
+            start = marker + 3
+        trailing = 0
+        cursor = len(search_data) - 1
+        while cursor >= 0 and search_data[cursor] == 0:
+            trailing += 1
+            cursor -= 1
+        pending_zeros = trailing
+        if final:
+            pending_zeros = 0
+
+    for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
+        consume(chunk)
+    stderr_bytes = process.stderr.read() if process.stderr else b""
+    returncode = process.wait()
+    consume(b"", final=True)
+    if returncode != 0:
+        stderr = stderr_bytes.decode(errors="replace")
+        raise ToolError(f"Could not scan VC-1 stuffing data in {path.name}:\n{stderr}")
+    return {"padding_bytes": stuffing_bytes, "padding_units": stuffing_runs, "padding_kind": "vc1_stuffing_bytes"}
+
+
+def count_coded_padding_bytes(path: Path, tools: dict[str, Any], codec_name: str, *, video_selector: str = "v:0") -> dict[str, Any] | None:
+    codec = str(codec_name or "").lower()
+    if codec in {"h264", "avc1"}:
+        return count_h264_filler_bytes(path, tools, video_selector=video_selector)
+    if codec in {"hevc", "h265"}:
+        return count_hevc_filler_bytes(path, tools, video_selector=video_selector)
+    if codec in {"vc1", "wmv3"}:
+        return count_vc1_stuffing_bytes(path, tools, video_selector=video_selector)
+    return None
+
+
 def count_video_frames(path: Path, tools: dict[str, Any], *, video_selector: str = "v:0") -> int | None:
     ffprobe = require_tool(tools, "ffprobe")
     cmd = [
@@ -271,6 +539,7 @@ def inspect_clip(
     tools: dict[str, Any],
     *,
     accurate_video_bitrate: bool = False,
+    depad_video_padding: bool = True,
     bitrate_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     info: dict[str, Any] = {
@@ -313,8 +582,46 @@ def inspect_clip(
         if accurate_video_bitrate and duration and duration > 0:
             packet_bytes = sum_video_packet_bytes(path, tools)
             if packet_bytes > 0:
-                video_bps = int(packet_bytes * 8 / duration)
-                bitrate_source = "video_packet_sum"
+                content_bytes = packet_bytes
+                padding_report = None
+                if depad_video_padding:
+                    try:
+                        padding_report = count_coded_padding_bytes(path, tools, codec_name)
+                    except ToolError as exc:
+                        info["warnings"].append(str(exc))
+                    else:
+                        padding_bytes = safe_int((padding_report or {}).get("padding_bytes")) or 0
+                        if 0 < padding_bytes < packet_bytes:
+                            content_bytes = packet_bytes - padding_bytes
+                            bitrate_source = "video_packet_sum_minus_coded_padding"
+                video_bps = int(content_bytes * 8 / duration)
+                if bitrate_source != "video_packet_sum_minus_coded_padding":
+                    bitrate_source = "video_packet_sum"
+                info["video"].update(
+                    {
+                        "source_video_packet_bytes": packet_bytes,
+                        "source_video_content_bytes": content_bytes,
+                    }
+                )
+                if padding_report:
+                    padding_bytes = safe_int(padding_report.get("padding_bytes")) or 0
+                    padding_units = safe_int(padding_report.get("padding_units")) or 0
+                    info["video"].update(
+                        {
+                            "source_video_padding_bytes": padding_bytes,
+                            "source_video_padding_units": padding_units,
+                            "source_video_padding_kind": padding_report.get("padding_kind"),
+                            "source_video_padding_bitrate_mbps": mbps(int(padding_bytes * 8 / duration)) if duration and padding_bytes else 0,
+                        }
+                    )
+                    if padding_report.get("padding_kind") == "h264_filler_nal":
+                        info["video"].update(
+                            {
+                                "h264_filler_bytes": padding_bytes,
+                                "h264_filler_nals": padding_units,
+                                "h264_filler_bitrate_mbps": mbps(int(padding_bytes * 8 / duration)) if duration and padding_bytes else 0,
+                            }
+                        )
         elif total_bitrate and (
             not video_bps
             or codec_name in MPEG2_SOURCE_CODECS
@@ -423,6 +730,7 @@ def scan_disc(
     tools: dict[str, Any],
     *,
     accurate_video_bitrate: bool,
+    depad_video_padding: bool = True,
     bitrate_options: dict[str, Any] | None = None,
     use_makemkv: bool = True,
     verbose: bool = False,
@@ -454,6 +762,7 @@ def scan_disc(
                 clip,
                 tools,
                 accurate_video_bitrate=accurate_video_bitrate and clip.stat().st_size > 100_000_000,
+                depad_video_padding=depad_video_padding,
                 bitrate_options=bitrate_options,
             ): clip
             for clip in clips

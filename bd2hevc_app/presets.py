@@ -171,6 +171,18 @@ def clip_list_value(value: Any, key: str) -> list[list[str]]:
     return result
 
 
+def bool_value(value: Any, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    raise ToolError(f"{key} must be true or false")
+
+
 def apply_named_preset_to_args(args: argparse.Namespace) -> dict[str, Any] | None:
     name = getattr(args, "preset", None)
     if not name:
@@ -196,6 +208,8 @@ def apply_named_preset_to_args(args: argparse.Namespace) -> dict[str, Any] | Non
         set_if_default(args, "maxrate_multiplier", float(value), 1.55)
     if (value := first_present(data, "bufsize_multiplier")) is not None:
         set_if_default(args, "bufsize_multiplier", float(value), 2.0)
+    if hasattr(args, "keep_source_padding") and (value := first_present(data, "keep_source_padding")) is not None:
+        set_if_default(args, "keep_source_padding", bool_value(value, "keep_source_padding"), False)
     if (value := first_present(data, "compact_cq_value", "compact-cq-value", "cq")) is not None:
         set_if_default(args, "compact_cq_value", int(value), ANIME_CQ_VALUE)
     if (value := first_present(data, "compact_cq_min_duration", "compact-cq-min-duration", "episode_compact_min_duration", "anime_cq_min_duration")) is not None:
@@ -249,6 +263,7 @@ def preset_data_from_args(args: argparse.Namespace) -> dict[str, Any]:
     put_if_set(data, "max_video_bitrate", getattr(args, "max_video_bitrate", 80_000_000), 80_000_000)
     put_if_set(data, "maxrate_multiplier", getattr(args, "maxrate_multiplier", 1.55), 1.55)
     put_if_set(data, "bufsize_multiplier", getattr(args, "bufsize_multiplier", 2.0), 2.0)
+    put_if_set(data, "keep_source_padding", getattr(args, "keep_source_padding", False), False)
     put_if_set(data, "compact_cq_value", getattr(args, "compact_cq_value", ANIME_CQ_VALUE), ANIME_CQ_VALUE)
     put_if_set(data, "compact_cq_min_duration", getattr(args, "anime_cq_min_duration", DEFAULT_ANIME_CQ_MIN_DURATION), DEFAULT_ANIME_CQ_MIN_DURATION)
     put_if_set(data, "main_title_quality", getattr(args, "main_title_quality", None))

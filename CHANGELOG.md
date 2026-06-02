@@ -108,6 +108,13 @@
 - Added `--target-disc-size` and `--target-disc-margin` so VBR conversions can
   scale planned replacement-video bitrates toward BD-25/BD-50/BD-66/BD-100 or
   explicit byte budgets.
+- Accurate bitrate planning now subtracts safe coded padding for normal library
+  conversions: AVC/H.264 filler NAL units, HEVC/H.265 filler NAL units, and
+  VC-1 stuffing bytes. `--keep-source-padding` restores the previous padded
+  source estimate for comparisons, while `--uhd-profile disc` keeps padded
+  totals for conservative physical-disc sizing.
+- Added `scripts/source_padding_audit.py`, a read-only helper for locating
+  transport null packets and safe coded-video padding in source BD backups.
 - Compact stereo audio now skips unplayable zero-channel streams that FFprobe
   can misidentify as audio, and maps source audio by stream index.
 - Improved generated output names with acronym and Roman numeral preservation,

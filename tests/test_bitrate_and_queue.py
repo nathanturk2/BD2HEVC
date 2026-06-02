@@ -45,6 +45,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("--preset-file", clips_help)
         self.assertIn("--top-n-quality", clips_help)
         self.assertIn("--clip-quality", clips_help)
+        self.assertIn("--keep-source-padding", clips_help)
 
         with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
             with self.assertRaises(SystemExit) as raised:
@@ -518,6 +519,45 @@ class CopyPlanningTests(unittest.TestCase):
             self.assertTrue(report["scaled"])
             self.assertLess(clip["video"]["target_hevc"]["target_bps"], 800_000)
             self.assertIn("disc-size fit", clip["video"]["target_hevc"]["reason"])
+
+    def test_h264_annexb_filler_counter_counts_type_12_nals(self) -> None:
+        stream = (
+            b"\x00\x00\x00\x01\x67\x64\x00\x28"
+            b"\x00\x00\x01\x0c" + (b"\xff" * 10)
+            + b"\x00\x00\x00\x01\x65\x88\x84"
+            + b"\x00\x00\x01\x0c" + (b"\x00" * 5)
+        )
+
+        filler_bytes, filler_nals = scan.count_h264_filler_bytes_in_annexb(stream)
+
+        self.assertEqual(filler_nals, 2)
+        self.assertEqual(filler_bytes, 14 + 9)
+
+    def test_hevc_annexb_filler_counter_counts_type_38_nals(self) -> None:
+        filler_header = bytes([(38 << 1), 0x01])
+        stream = (
+            b"\x00\x00\x00\x01" + bytes([(32 << 1), 0x01]) + b"\x01\x02"
+            + b"\x00\x00\x01" + filler_header + (b"\xff" * 6)
+            + b"\x00\x00\x00\x01" + bytes([(19 << 1), 0x01]) + b"\x88\x84"
+        )
+
+        filler_bytes, filler_nals = scan.count_hevc_filler_bytes_in_annexb(stream)
+
+        self.assertEqual(filler_nals, 1)
+        self.assertEqual(filler_bytes, 3 + 2 + 6)
+
+    def test_vc1_annexb_stuffing_counter_counts_extra_zero_bytes_before_start_codes(self) -> None:
+        stream = (
+            b"\x00\x00\x01\x0f\xaa\xbb"
+            + b"\x00\x00\x00\x00\x01\x0d\xcc"
+            + b"\x00\x00\x00\x01\x0d\xdd"
+            + b"\x00\x00\x01\x0e\xee"
+        )
+
+        stuffing_bytes, stuffing_runs = scan.count_vc1_stuffing_bytes_in_annexb(stream)
+
+        self.assertEqual(stuffing_runs, 2)
+        self.assertEqual(stuffing_bytes, 3)
 
     def test_disc_title_normalizer_preserves_acronyms_and_roman_numerals(self) -> None:
         self.assertEqual(output.disc_title_from_folder_name("BACK_TO_THE_FUTURE_PART_II"), "Back to the Future Part II")

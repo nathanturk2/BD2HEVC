@@ -374,6 +374,12 @@ def normalize_uhd_profile(value: Any) -> str:
     raise ToolError("--uhd-profile must be library or disc")
 
 
+def depad_video_padding_from_args(args: argparse.Namespace) -> bool:
+    if getattr(args, "keep_source_padding", False):
+        return False
+    return normalize_uhd_profile(getattr(args, "uhd_profile", "library")) != "disc"
+
+
 def bitrate_options_for_args(args: argparse.Namespace) -> dict[str, Any]:
     options = bitrate_options_from_args(args)
     spec = parse_quality_spec(getattr(args, "quality", None), option="--quality")
@@ -931,7 +937,13 @@ def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[
         transcode_input = source_clip
 
     bitrate_options = bitrate_options_for_args(args)
-    clip_info = inspect_clip(transcode_input, tools, accurate_video_bitrate=not args.fast_bitrate and not args.dry_run, bitrate_options=bitrate_options)
+    clip_info = inspect_clip(
+        transcode_input,
+        tools,
+        accurate_video_bitrate=not args.fast_bitrate,
+        depad_video_padding=depad_video_padding_from_args(args),
+        bitrate_options=bitrate_options,
+    )
     if clip_info.get("action") != "reencode" and not args.force_encode:
         raise ToolError(f"Selected title does not require non-HEVC reencoding: {transcode_input}")
     mux_clip_info = copy.deepcopy(clip_info)
@@ -1072,6 +1084,10 @@ def clone_streams_plan_payload(
             "mode": audio_mode_from_args(args),
             "stereo_bitrate": stereo_audio_bitrate_from_args(args),
             "mono_bitrate": mono_audio_bitrate_from_args(args),
+        },
+        "source_padding": {
+            "mode": "subtract_safe_coded_padding" if depad_video_padding_from_args(args) else "keep",
+            "note": "Library planning subtracts safe AVC/HEVC filler and VC-1 stuffing from accurate source video bitrate. --keep-source-padding and --uhd-profile disc keep the padded-source estimate.",
         },
         "target_disc_fit": target_disc_fit,
         "uhd_profile": normalize_uhd_profile(getattr(args, "uhd_profile", "library")),
@@ -1377,7 +1393,8 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     scan = scan_disc(
         source,
         tools,
-        accurate_video_bitrate=not args.fast_bitrate and not args.dry_run,
+        accurate_video_bitrate=not args.fast_bitrate,
+        depad_video_padding=depad_video_padding_from_args(args),
         bitrate_options=bitrate_options,
         use_makemkv=use_makemkv_from_args(args),
         verbose=args.verbose,
@@ -1584,6 +1601,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
             root,
             tools,
             accurate_video_bitrate=args.accurate_video_bitrate,
+            depad_video_padding=not getattr(args, "keep_source_padding", False),
             bitrate_options=bitrate_options,
             use_makemkv=use_makemkv_from_args(args),
             verbose=args.verbose,
@@ -1689,6 +1707,7 @@ def cmd_clips(args: argparse.Namespace) -> int:
         source,
         tools,
         accurate_video_bitrate=args.accurate_video_bitrate,
+        depad_video_padding=not getattr(args, "keep_source_padding", False),
         bitrate_options=bitrate_options,
         use_makemkv=use_makemkv_from_args(args),
         verbose=args.verbose,
@@ -2349,6 +2368,7 @@ def add_bitrate_args(parser: argparse.ArgumentParser, *, include_named_preset: b
     parser.add_argument("--max-video-bitrate", type=parse_bitrate_arg, default=80_000_000, help="Maximum target video bitrate. Accepts values like 80M.")
     parser.add_argument("--maxrate-multiplier", type=float, default=1.55, help="VBV maxrate multiplier relative to target bitrate.")
     parser.add_argument("--bufsize-multiplier", type=float, default=2.0, help="VBV buffer multiplier relative to maxrate.")
+    parser.add_argument("--keep-source-padding", action="store_true", help="Keep coded filler/stuffing bytes in source bitrate planning. By default, accurate planning subtracts safe AVC/HEVC/VC-1 padding for library outputs.")
     parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for reencoded clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
     parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Defaults to the 10-second reencode threshold. Raise it if only episode/movie-length clips should use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
     parser.add_argument("--main-title-quality", metavar="QUALITY", default=None, help="Quality for the longest reencode-eligible clip. Accepts a bitrate preset, cq:N, source-ratio:N, legacy presets, or copy/no-reencode. Mutually exclusive with top-N overrides.")

@@ -247,6 +247,17 @@ python bd2hevc.py queue "Mixed Codec Disc" --output-dir "Converted UHD-BD" --qua
 The codec-specific ratio wins only for matching source clips. Other clips keep
 the general ratio or preset.
 
+When accurate bitrate planning is used, BD2HEVC bases VBR presets on the actual
+video packet payload rather than the whole M2TS container. For normal library
+outputs it also subtracts safe coded padding where the codec exposes it:
+AVC/H.264 filler NAL units, HEVC/H.265 filler NAL units, and VC-1 stuffing bytes.
+This keeps authored-disc padding from making `balanced`, `smaller`, and
+`transparent` spend bits on data that was not meaningful picture information.
+Use `--keep-source-padding` to reproduce the previous padded-source estimate or
+for conservative comparisons. `--uhd-profile disc` also keeps the padded-source
+estimate because physical-disc sizing experiments should avoid optimistic
+bitrate budgets.
+
 For storage-limited movie collections, you can spend more bits on the main
 feature while keeping extras compact:
 
@@ -283,10 +294,13 @@ not a claim that the result is a licensed/encrypted UHD-BD.
 `--uhd-profile` is reserved for intent and guardrails:
 
 - `--uhd-profile library` is the default. It is for normal VLC/libbluray folder
-  playback and still applies the UHD-like structure.
+  playback and still applies the UHD-like structure. Library mode subtracts safe
+  coded source padding during accurate VBR planning.
 - `--uhd-profile disc` is for physical-disc experiments. It requires
   `--target-disc-size` and rejects CQ/compact-CQ settings because CQ cannot know
-  the final size before encoding.
+  the final size before encoding. Disc mode keeps padded source bitrate
+  estimates for conservative sizing; it does not add fake codec filler back into
+  the HEVC stream.
 
 Patch an existing converted output without reencoding it:
 
@@ -686,6 +700,15 @@ anchored around the common HEVC "same quality at roughly half the bitrate"
 target, then keeps a safety margin for one-pass hardware encoding and Blu-ray
 folder playback.
 
+For normal library conversions, accurate bitrate planning also subtracts safe
+coded padding from the source video packet total: AVC/H.264 filler NAL units,
+HEVC/H.265 filler NAL units, and VC-1 stuffing bytes. That keeps Blu-ray padding
+from making `balanced`, `smaller`, `transparent`, and `source-ratio` spend bits
+on data that was only there to satisfy the authored disc's rate-control/transport
+constraints. `--keep-source-padding` keeps the previous padded-source estimate
+for comparisons, and `--uhd-profile disc` keeps the padded total for more
+conservative physical-disc experiments.
+
 For clips that use different source codecs, `balanced`, `smaller`, and
 `transparent` all start from the same source-equivalent curve and then apply a
 codec adjustment:
@@ -812,8 +835,8 @@ python bd2hevc.py auto "Disc" --preset-file examples/bitrate/source-ratio-by-cod
 
 Preset files can set `mode`, `hevc_bitrate_factor` or `factor`,
 `min_video_bitrate`, `max_video_bitrate`, `maxrate_multiplier`,
-`bufsize_multiplier`, `compact_cq_value`, `compact_cq_min_duration`, and
-`codec_source_ratios`.
+`bufsize_multiplier`, `keep_source_padding`, `compact_cq_value`,
+`compact_cq_min_duration`, and `codec_source_ratios`.
 Non-default CLI flags still work for one-off overrides. For example, a preset
 can hold the normal source ratios while a command line can temporarily add or
 replace one codec ratio with `--codec-source-ratio mpeg2video=0.28`.
@@ -828,6 +851,7 @@ python bd2hevc.py auto "Disc" --quality source-ratio:0.62
 python bd2hevc.py auto "Disc" --quality source-ratio:0.60 --codec-source-ratio mpeg2video=0.30
 python bd2hevc.py auto "Disc" --min-video-bitrate 2500k --max-video-bitrate 60M
 python bd2hevc.py auto "Disc" --maxrate-multiplier 1.5 --bufsize-multiplier 2.0
+python bd2hevc.py auto "Disc" --quality balanced --keep-source-padding --dry-run
 ```
 
 ## Supported So Far
@@ -929,6 +953,18 @@ Create a redacted bundle for a GitHub support issue:
 ```bash
 python bd2hevc.py diagnose "Converted UHD-BD/My Disc (BD) (UHD converted)" --source "MY_DISC_BACKUP"
 ```
+
+Audit source backups for transport null packets and safe coded-video padding:
+
+```bash
+python scripts/source_padding_audit.py "BD backups" --report reports/source-padding-audit.json --progress reports/source-padding-audit.progress.json
+```
+
+The audit is read-only. It is mainly useful when you want to know whether a
+source disc has codec filler that can inflate source-ratio or `balanced` VBR
+planning. The report separates mux-layer null packets from coded-video padding,
+and lists the clip files that contain H.264 filler, HEVC filler, or VC-1
+stuffing bytes.
 
 ## JSON Output
 
