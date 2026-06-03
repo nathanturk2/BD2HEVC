@@ -53,6 +53,19 @@ BITRATE_MODES = ("smaller", "balanced", "transparent", "source-ratio", ANIME_CQ_
 HEVC_ENCODERS = ("hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265")
 HARDWARE_HEVC_ENCODERS = {"hevc_nvenc", "hevc_qsv", "hevc_amf"}
 
+DEINTERLACE_MODES = ("off", "auto", "force")
+DEINTERLACE_FILTERS = ("bwdif", "yadif")
+INTERLACED_FIELD_ORDERS = {
+    "tt",
+    "bb",
+    "tb",
+    "bt",
+    "top coded first (swapped)",
+    "bottom coded first (swapped)",
+    "top coded first",
+    "bottom coded first",
+}
+
 AUDIO_MODES = ("passthrough", "compact-stereo")
 DEFAULT_AUDIO_MODE = "passthrough"
 DEFAULT_STEREO_AUDIO_BITRATE = 256_000

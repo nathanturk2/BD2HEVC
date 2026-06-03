@@ -144,6 +144,7 @@ def encode_to_hevc_m2ts(
     audio_mode: str = DEFAULT_AUDIO_MODE,
     stereo_audio_bitrate: int = DEFAULT_STEREO_AUDIO_BITRATE,
     mono_audio_bitrate: int = DEFAULT_MONO_AUDIO_BITRATE,
+    deinterlace_filter: str = "bwdif",
     dry_run: bool = False,
     verbose: bool = False,
 ) -> list[str]:
@@ -191,6 +192,14 @@ def encode_to_hevc_m2ts(
         if audio_mode == DEFAULT_AUDIO_MODE:
             cmd.extend(["-map", "0:s?"])
     filters = []
+    postprocess = video.get("postprocess") or {}
+    if (postprocess.get("deinterlace") or {}).get("enabled"):
+        if deinterlace_filter == "bwdif":
+            filters.append("bwdif=mode=send_frame:parity=auto:deint=all")
+        elif deinterlace_filter == "yadif":
+            filters.append("yadif=mode=send_frame:parity=auto:deint=all")
+        else:
+            raise ToolError(f"Unsupported deinterlace filter: {deinterlace_filter}")
     if scale_uhd:
         filters.append("scale=3840:2160:flags=lanczos")
     if video.get("sparse_timestamp_video"):

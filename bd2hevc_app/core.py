@@ -47,6 +47,8 @@ from .config import (
     AUDIO_MODES,
     ANIME_CQ_VALUE,
     BITRATE_MODES,
+    DEINTERLACE_FILTERS,
+    DEINTERLACE_MODES,
     DEFAULT_ANIME_CQ_MIN_DURATION,
     DEFAULT_AUDIO_MODE,
     DEFAULT_MAKEMKV_TIMEOUT_SECONDS,
@@ -55,6 +57,7 @@ from .config import (
     DEFAULT_STEREO_AUDIO_BITRATE,
     DEFAULT_VLC_COMPATIBILITY_MODE,
     HEVC_ENCODERS,
+    INTERLACED_FIELD_ORDERS,
     KNOWN_VLC_COMPATIBILITY_FIXES,
     LEGACY_ANIME_CQ_PRESET,
     LEGACY_EPISODE_COMPACT_PRESET,
@@ -851,6 +854,78 @@ def apply_clip_copy_overrides(clips: list[dict[str, Any]], requested: Any) -> di
     return {"requested": names, "clips": report_clips, "matched_count": len(report_clips)}
 
 
+def source_field_order(video: dict[str, Any]) -> str:
+    return str(video.get("field_order") or "").strip().lower()
+
+
+def clip_is_interlaced_by_metadata(clip: dict[str, Any]) -> bool:
+    video = clip.get("video") or {}
+    return source_field_order(video) in INTERLACED_FIELD_ORDERS
+
+
+def apply_deinterlace_plan(clips: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any] | None:
+    mode = getattr(args, "deinterlace", "off")
+    force_names = set(normalize_clip_names(getattr(args, "deinterlace_clips", None)))
+    skip_names = set(normalize_clip_names(getattr(args, "no_deinterlace_clips", None)))
+    if force_names:
+        require_named_clips(clips, sorted(force_names), option="--deinterlace-clips")
+    if skip_names:
+        require_named_clips(clips, sorted(skip_names), option="--no-deinterlace-clips")
+    if mode == "off" and not force_names:
+        return None
+    selected: list[dict[str, Any]] = []
+    for clip in clips:
+        name = normalize_clip_name(clip.get("file") or "")
+        video = clip.get("video") or {}
+        reason = None
+        if name in skip_names:
+            reason = None
+        elif name in force_names:
+            reason = "requested by --deinterlace-clips"
+        elif mode == "force":
+            reason = "requested by --deinterlace force"
+        elif mode == "auto" and clip_is_interlaced_by_metadata(clip):
+            reason = f"source field_order={video.get('field_order')}"
+        if not reason:
+            continue
+        if clip.get("action") != "reencode":
+            selected.append(
+                {
+                    "file": clip.get("file"),
+                    "action": clip.get("action"),
+                    "field_order": video.get("field_order"),
+                    "selected": False,
+                    "reason": f"deinterlace skipped because clip action is {clip.get('action')}",
+                }
+            )
+            continue
+        postprocess = video.setdefault("postprocess", {})
+        postprocess["deinterlace"] = {
+            "enabled": True,
+            "mode": mode,
+            "filter": getattr(args, "deinterlace_filter", "bwdif"),
+            "reason": reason,
+        }
+        selected.append(
+            {
+                "file": clip.get("file"),
+                "action": clip.get("action"),
+                "field_order": video.get("field_order"),
+                "selected": True,
+                "filter": getattr(args, "deinterlace_filter", "bwdif"),
+                "reason": reason,
+            }
+        )
+    return {
+        "mode": mode,
+        "filter": getattr(args, "deinterlace_filter", "bwdif"),
+        "force_clips": sorted(force_names),
+        "skip_clips": sorted(skip_names),
+        "clips": selected,
+        "matched_count": sum(1 for item in selected if item.get("selected")),
+    }
+
+
 def apply_quality_overrides(
     clips: list[dict[str, Any]],
     bitrate_options: dict[str, Any],
@@ -946,6 +1021,7 @@ def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[
     )
     if clip_info.get("action") != "reencode" and not args.force_encode:
         raise ToolError(f"Selected title does not require non-HEVC reencoding: {transcode_input}")
+    postprocess = apply_deinterlace_plan([clip_info], args)
     mux_clip_info = copy.deepcopy(clip_info)
     if args.uhd_scale:
         video_info = mux_clip_info.setdefault("video", {})
@@ -963,6 +1039,7 @@ def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[
         scale_uhd=args.uhd_scale,
         hevc_bit_depth=args.hevc_bit_depth,
         encoder=selected_hevc_encoder(args),
+        deinterlace_filter=getattr(args, "deinterlace_filter", "bwdif"),
         dry_run=args.dry_run,
         verbose=args.verbose,
     )
@@ -977,6 +1054,7 @@ def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[
             "clip_info": clip_summary(clip_info),
             "encoder": selected_hevc_encoder(args),
             "bitrate": bitrate_options,
+            "postprocess": postprocess,
             "uhd_scale": args.uhd_scale,
             "skip_audio": args.skip_audio,
             "skip_subtitles": args.skip_subtitles,
@@ -1065,6 +1143,7 @@ def clone_streams_plan_payload(
     *,
     quality_overrides: dict[str, Any] | None = None,
     copy_clip_overrides: dict[str, Any] | None = None,
+    postprocess: dict[str, Any] | None = None,
     target_disc_fit: dict[str, Any] | None = None,
     planning_pending: bool = False,
 ) -> dict[str, Any]:
@@ -1080,11 +1159,13 @@ def clone_streams_plan_payload(
         "top_n_cq_override": top_n_cq_override,
         "quality_overrides": quality_overrides,
         "copy_clip_overrides": copy_clip_overrides,
+        "postprocess": postprocess,
         "audio": {
             "mode": audio_mode_from_args(args),
             "stereo_bitrate": stereo_audio_bitrate_from_args(args),
             "mono_bitrate": mono_audio_bitrate_from_args(args),
         },
+        "postprocess": postprocess,
         "source_padding": {
             "mode": "subtract_safe_coded_padding" if depad_video_padding_from_args(args) else "keep",
             "note": "Library planning subtracts safe AVC/HEVC filler and VC-1 stuffing from accurate source video bitrate. --keep-source-padding and --uhd-profile disc keep the padded-source estimate.",
@@ -1115,6 +1196,7 @@ def encode_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: 
             video_only=True,
             hevc_bit_depth=args.hevc_bit_depth,
             encoder=selected_hevc_encoder(args),
+            deinterlace_filter=getattr(args, "deinterlace_filter", "bwdif"),
             dry_run=False,
             verbose=args.verbose,
         )
@@ -1282,101 +1364,160 @@ def run_queued_encode_audio_mux_pipeline(
     validations: list[dict[str, Any]] = []
     done_seconds = 0.0
     max_depth = max(1, int(getattr(args, "encode_ahead_depth", 3) or 1))
-    encoded_queue: thread_queue.Queue[tuple[str, dict[str, Any] | BaseException | None]] = thread_queue.Queue(maxsize=max_depth)
-    audio_ready_queue: thread_queue.Queue[tuple[str, dict[str, Any] | BaseException | None]] = thread_queue.Queue(maxsize=max_depth)
+    result_queue: thread_queue.Queue[tuple[str, dict[str, Any] | BaseException | None]] = thread_queue.Queue(maxsize=max_depth * 2 + 2)
     stop_event = threading.Event()
+    lane_condition = threading.Condition()
+    pending_by_lane = {"video": 0, "audio": 0}
 
-    def queue_put(q: thread_queue.Queue[tuple[str, dict[str, Any] | BaseException | None]], item: tuple[str, dict[str, Any] | BaseException | None]) -> bool:
+    def queue_put(item: tuple[str, dict[str, Any] | BaseException | None]) -> bool:
         while not stop_event.is_set():
             try:
-                q.put(item, timeout=0.5)
+                result_queue.put(item, timeout=0.5)
                 return True
             except thread_queue.Full:
                 continue
         return False
 
-    def producer() -> None:
+    def wait_for_lane_room(lane: str) -> bool:
+        with lane_condition:
+            while not stop_event.is_set() and pending_by_lane[lane] >= max_depth:
+                lane_condition.wait(timeout=0.5)
+            return not stop_event.is_set()
+
+    def mark_lane_ready(lane: str) -> None:
+        with lane_condition:
+            pending_by_lane[lane] += 1
+            lane_condition.notify_all()
+
+    def release_lane_outputs() -> None:
+        with lane_condition:
+            pending_by_lane["video"] = max(0, pending_by_lane["video"] - 1)
+            pending_by_lane["audio"] = max(0, pending_by_lane["audio"] - 1)
+            lane_condition.notify_all()
+
+    def video_worker() -> None:
         try:
             for ctx in contexts:
                 if stop_event.is_set():
                     break
+                if not wait_for_lane_room("video"):
+                    break
                 encode_clone_clip_context(ctx, tools, args)
-                if not queue_put(encoded_queue, ("encoded", ctx)):
+                mark_lane_ready("video")
+                if not queue_put(("video", ctx)):
                     break
         except BaseException as exc:
-            queue_put(encoded_queue, ("error", exc))
+            queue_put(("error", exc))
         finally:
-            queue_put(encoded_queue, ("done", None))
+            queue_put(("video-done", None))
 
     def audio_worker() -> None:
         try:
-            while True:
-                kind, payload = encoded_queue.get()
-                if kind == "done":
-                    queue_put(audio_ready_queue, ("done", None))
-                    return
-                if kind == "error":
-                    queue_put(audio_ready_queue, ("error", payload))
-                    return
-                ctx = payload
-                assert isinstance(ctx, dict)
+            for ctx in contexts:
+                if stop_event.is_set():
+                    break
+                if not wait_for_lane_room("audio"):
+                    break
                 transcode_compact_audio_context(ctx, tools, args)
-                if not queue_put(audio_ready_queue, ("audio", ctx)):
-                    return
+                mark_lane_ready("audio")
+                if not queue_put(("audio", ctx)):
+                    break
         except BaseException as exc:
-            queue_put(audio_ready_queue, ("error", exc))
+            queue_put(("error", exc))
+        finally:
+            queue_put(("audio-done", None))
 
-    progress_event("pipeline", "enabled", mode="encode-audio-mux-queue", depth=max_depth)
+    def stop_workers() -> None:
+        stop_event.set()
+        with lane_condition:
+            lane_condition.notify_all()
+
+    progress_event("pipeline", "enabled", mode="video-audio-mux-queue", depth=max_depth)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        producer_future = executor.submit(producer)
+        video_future = executor.submit(video_worker)
         audio_future = executor.submit(audio_worker)
+        video_ready: dict[str, dict[str, Any]] = {}
+        audio_ready: dict[str, dict[str, Any]] = {}
+        mux_queue: list[dict[str, Any]] = []
+        queued_for_mux: set[str] = set()
+        muxed: set[str] = set()
+        video_done = False
+        audio_done = False
+
+        def queue_mux_if_ready(clip_file: str) -> None:
+            if clip_file in queued_for_mux or clip_file in muxed:
+                return
+            if clip_file in video_ready and clip_file in audio_ready:
+                mux_queue.append(video_ready[clip_file])
+                queued_for_mux.add(clip_file)
+
         try:
             while True:
-                kind, payload = audio_ready_queue.get()
-                if kind == "done":
+                if mux_queue:
+                    ctx = mux_queue.pop(0)
+                    clip_file = ctx["file"]
+                    emit_conversion_progress(
+                        done_seconds,
+                        total_seconds,
+                        len(validations),
+                        len(contexts),
+                        current=clip_file,
+                        stage="muxing video/audio queue",
+                        enabled=progress_enabled,
+                    )
+                    validation = mux_validate_clone_clip_context(ctx, tools, args)
+                    validations.append(validation)
+                    done_seconds += float(ctx["clip"].get("duration") or 0)
+                    muxed.add(clip_file)
+                    video_ready.pop(clip_file, None)
+                    audio_ready.pop(clip_file, None)
+                    release_lane_outputs()
+                    emit_conversion_progress(
+                        done_seconds,
+                        total_seconds,
+                        len(validations),
+                        len(contexts),
+                        current=clip_file,
+                        stage="validated",
+                        enabled=progress_enabled,
+                    )
+                    continue
+                if video_done and audio_done and len(muxed) >= len(contexts):
                     audio_future.result()
-                    producer_future.result()
+                    video_future.result()
                     break
+                kind, payload = result_queue.get()
                 if kind == "error":
-                    stop_event.set()
-                    audio_future.result()
-                    producer_future.result()
+                    stop_workers()
+                    for future in (audio_future, video_future):
+                        try:
+                            future.result()
+                        except BaseException:
+                            pass
                     raise payload  # type: ignore[misc]
+                if kind == "video-done":
+                    video_done = True
+                    video_future.result()
+                    continue
+                if kind == "audio-done":
+                    audio_done = True
+                    audio_future.result()
+                    continue
                 ctx = payload
                 assert isinstance(ctx, dict)
-                emit_conversion_progress(
-                    done_seconds,
-                    total_seconds,
-                    len(validations),
-                    len(contexts),
-                    current=ctx["file"],
-                    stage="muxing audio queue",
-                    enabled=progress_enabled,
-                )
-                validation = mux_validate_clone_clip_context(ctx, tools, args)
-                validations.append(validation)
-                done_seconds += float(ctx["clip"].get("duration") or 0)
-                emit_conversion_progress(
-                    done_seconds,
-                    total_seconds,
-                    len(validations),
-                    len(contexts),
-                    current=ctx["file"],
-                    stage="validated",
-                    enabled=progress_enabled,
-                )
+                if kind == "video":
+                    video_ready[ctx["file"]] = ctx
+                    queue_mux_if_ready(ctx["file"])
+                elif kind == "audio":
+                    audio_ready[ctx["file"]] = ctx
+                    queue_mux_if_ready(ctx["file"])
         except BaseException:
-            stop_event.set()
-            for q in (encoded_queue, audio_ready_queue):
-                while True:
-                    try:
-                        q.get_nowait()
-                    except thread_queue.Empty:
-                        break
+            stop_workers()
+            while True:
                 try:
-                    q.put_nowait(("done", None))
-                except thread_queue.Full:
-                    pass
+                    result_queue.get_nowait()
+                except thread_queue.Empty:
+                    break
             raise
     return validations, done_seconds
 
@@ -1404,6 +1545,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     main_title_cq_override = (quality_overrides or {}).get("main_title_cq")
     top_n_cq_override = (quality_overrides or {}).get("top_n_cq")
     copy_clip_overrides = apply_clip_copy_overrides(scan.get("clips", []), getattr(args, "copy_clips", None))
+    postprocess = apply_deinterlace_plan(scan.get("clips", []), args)
     disc_fit = fit_reencoded_clips_to_disc_size(
         source,
         scan.get("clips", []),
@@ -1423,6 +1565,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         clips,
         quality_overrides=quality_overrides,
         copy_clip_overrides=copy_clip_overrides,
+        postprocess=postprocess,
         target_disc_fit=disc_fit,
     )
     if progress_plan_path:
@@ -1542,7 +1685,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         "makemkv_validation": makemkv_validation,
     }
     if encode_ahead:
-        result["pipeline"] = "encode-audio-mux-queue" if compact_audio_pipeline else "encode-mux-queue"
+        result["pipeline"] = "video-audio-mux-queue" if compact_audio_pipeline else "encode-mux-queue"
     if navigation_patch is not None:
         result["navigation_patch"] = navigation_patch
     if bdj_compatibility_patch is not None:
@@ -1609,6 +1752,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         remember_original_clip_actions(report.get("clips", []))
         report["quality_overrides"] = apply_quality_overrides(report.get("clips", []), bitrate_options, args)
         report["copy_clip_overrides"] = apply_clip_copy_overrides(report.get("clips", []), getattr(args, "copy_clips", None))
+        report["postprocess"] = apply_deinterlace_plan(report.get("clips", []), args)
         report["summary"] = summarize_disc(report)
         reports.append(report)
         out = report_dir / f"{root.name}.scan.json"
@@ -1654,6 +1798,21 @@ def planned_clip_output_codec(clip: dict[str, Any]) -> str | None:
     return None
 
 
+def field_order_label(field_order: Any) -> str:
+    text = str(field_order or "").strip().lower()
+    if not text or text == "unknown":
+        return "-"
+    if text == "progressive":
+        return "prog"
+    if text in {"tt", "bb", "tb", "bt"}:
+        return text
+    if "top" in text:
+        return "top"
+    if "bottom" in text:
+        return "bottom"
+    return text[:7]
+
+
 def clip_list_rows(clips: list[dict[str, Any]], *, sort: str = "duration") -> list[dict[str, Any]]:
     if sort == "file":
         sorted_clips = sorted(clips, key=lambda item: str(item.get("file") or ""))
@@ -1674,24 +1833,32 @@ def clip_list_rows(clips: list[dict[str, Any]], *, sort: str = "duration") -> li
                 "planned_codec": planned_clip_output_codec(clip),
                 "source_video_mbps": video.get("source_video_bitrate_mbps"),
                 "planned_quality": planned_clip_quality_text(clip),
+                "field_order": video.get("field_order"),
+                "postprocess": video.get("postprocess"),
             }
         )
     return rows
 
 
 def print_clip_list(rows: list[dict[str, Any]]) -> None:
-    print(f"{'clip':<12} {'duration':>8} {'action':<12} {'source':<10} {'output':<8} {'src Mbps':>8}  quality")
-    print(f"{'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 8} {'-' * 8}  {'-' * 24}")
+    print(f"{'clip':<12} {'duration':>8} {'action':<12} {'source':<10} {'field':<7} {'output':<8} {'src Mbps':>8}  quality")
+    print(f"{'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 7} {'-' * 8} {'-' * 8}  {'-' * 24}")
     for row in rows:
         mbps_text = "" if row.get("source_video_mbps") is None else str(row.get("source_video_mbps"))
+        postprocess = row.get("postprocess") or {}
+        quality = row.get("planned_quality") or ""
+        if (postprocess.get("deinterlace") or {}).get("enabled"):
+            quality = f"{quality}; deinterlace".strip("; ")
+        field = field_order_label(row.get("field_order"))
         print(
             f"{str(row.get('clip') or ''):<12} "
             f"{str(row.get('duration_text') or ''):>8} "
             f"{str(row.get('planned_action') or ''):<12} "
             f"{str(row.get('source_codec') or row.get('codec') or ''):<10} "
+            f"{field:<7} "
             f"{str(row.get('planned_codec') or ''):<8} "
             f"{mbps_text:>8}  "
-            f"{row.get('planned_quality') or ''}"
+            f"{quality}"
         )
 
 
@@ -1715,6 +1882,7 @@ def cmd_clips(args: argparse.Namespace) -> int:
     remember_original_clip_actions(report.get("clips", []))
     quality_overrides = apply_quality_overrides(report.get("clips", []), bitrate_options, args)
     copy_clip_overrides = apply_clip_copy_overrides(report.get("clips", []), getattr(args, "copy_clips", None))
+    postprocess = apply_deinterlace_plan(report.get("clips", []), args)
     rows = clip_list_rows(report.get("clips", []), sort=args.sort)
     payload = {
         "source": str(source),
@@ -1722,6 +1890,7 @@ def cmd_clips(args: argparse.Namespace) -> int:
         "bitrate": bitrate_options,
         "quality_overrides": quality_overrides,
         "copy_clip_overrides": copy_clip_overrides,
+        "postprocess": postprocess,
         "clips": rows,
     }
     if args.json:
@@ -2387,7 +2556,14 @@ def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: b
     parser.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="HEVC encoder to use. Default is hevc_nvenc. Use --encoder libx265, hevc_qsv, or hevc_amf if NVENC is unavailable and your FFmpeg build supports that encoder. Hardware encoders can overlap next-clip encoding with later audio/muxing stages; libx265 stays serial.")
     if include_encode_ahead:
         parser.add_argument("--no-encode-ahead", action="store_true", help="Disable hardware encode-ahead pipelining and run encode/mux serially.")
-        parser.add_argument("--encode-ahead-depth", type=int, default=3, help="Maximum completed HEVC temp clips allowed to wait for later audio/muxing stages. Hardware encoders only; default 3.")
+        parser.add_argument("--encode-ahead-depth", type=int, default=3, help="Maximum completed video/audio outputs per lane allowed to wait for muxing. Hardware encoders only; default 3.")
+
+
+def add_postprocess_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--deinterlace", choices=DEINTERLACE_MODES, default="off", help="Optional video post-processing for reencoded clips. off preserves the source; auto deinterlaces clips flagged interlaced by source metadata; force deinterlaces every reencoded clip.")
+    parser.add_argument("--deinterlace-filter", choices=DEINTERLACE_FILTERS, default="bwdif", help="FFmpeg deinterlace filter to use when deinterlacing. bwdif is higher quality; yadif is the compatibility fallback.")
+    parser.add_argument("--deinterlace-clips", nargs="+", action="append", default=None, metavar="CLIP", help="Force deinterlacing for named M2TS clips, even when --deinterlace is off or metadata says progressive. Accepts 00043 or 00043.m2ts. Can be repeated.")
+    parser.add_argument("--no-deinterlace-clips", nargs="+", action="append", default=None, metavar="CLIP", help="Do not deinterlace named M2TS clips, even when --deinterlace auto/force would select them. Can be repeated.")
 
 
 def add_audio_args(parser: argparse.ArgumentParser) -> None:
@@ -2477,6 +2653,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_preset_save.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="Save a preferred HEVC encoder in the preset.")
     p_preset_save.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="Save a preferred HEVC output bit depth.")
     add_bitrate_args(p_preset_save, include_named_preset=False, include_file_preset=False)
+    add_postprocess_args(p_preset_save)
     add_audio_args(p_preset_save)
     p_preset_save.set_defaults(func=cmd_preset_save_validated)
 
@@ -2493,6 +2670,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
     p_scan.add_argument("--accurate-video-bitrate", action="store_true", help="Sum video packet sizes for bitrate. Slower, but best for encode planning.")
     add_bitrate_args(p_scan)
+    add_postprocess_args(p_scan)
     add_makemkv_args(p_scan)
     p_scan.add_argument("--verbose", action="store_true")
     p_scan.set_defaults(func=cmd_scan)
@@ -2506,6 +2684,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_clips.add_argument("--sort", choices=["duration", "file"], default="duration", help="Sort by duration descending or by clip filename.")
     p_clips.add_argument("--accurate-video-bitrate", action="store_true", help="Sum video packet sizes for bitrate. Slower, but best for exact source Mbps.")
     add_bitrate_args(p_clips)
+    add_postprocess_args(p_clips)
     add_makemkv_args(p_clips)
     p_clips.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_clips.add_argument("--verbose", action="store_true")
@@ -2532,6 +2711,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth. 8 preserves 8-bit BD sources and is VLC-friendly; use 10 for explicit Main10 output.")
     add_encoder_args(p_auto, include_encode_ahead=True)
     add_bitrate_args(p_auto)
+    add_postprocess_args(p_auto)
     add_audio_args(p_auto)
     add_uhd_output_args(p_auto)
     p_auto.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
@@ -2563,6 +2743,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_start.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth.")
     add_encoder_args(p_start, include_encode_ahead=True)
     add_bitrate_args(p_start)
+    add_postprocess_args(p_start)
     add_audio_args(p_start)
     add_uhd_output_args(p_start)
     p_start.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
@@ -2590,6 +2771,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_queue.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth.")
     add_encoder_args(p_queue, include_encode_ahead=True)
     add_bitrate_args(p_queue)
+    add_postprocess_args(p_queue)
     add_audio_args(p_queue)
     add_uhd_output_args(p_queue)
     p_queue.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
@@ -2824,6 +3006,7 @@ def add_convert_args(parser: argparse.ArgumentParser, *, source_optional: bool =
     parser.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth. 8 preserves 8-bit BD sources and is VLC-friendly; use 10 for explicit Main10 output.")
     add_encoder_args(parser, include_encode_ahead=True)
     add_bitrate_args(parser)
+    add_postprocess_args(parser)
     parser.add_argument("--skip-audio", action="store_true", help="Diagnostic only: mux video without audio tracks.")
     parser.add_argument("--skip-subtitles", action="store_true", help="Mux audio only with the encoded video; omit PGS subtitle tracks.")
     parser.add_argument("--patch-navigation", action=argparse.BooleanOptionalAction, default=True, help="In clone-streams mode, update CLPI/MPLS primary video descriptors from AVC to HEVC for reencoded clips.")

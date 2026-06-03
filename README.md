@@ -34,6 +34,7 @@ guaranteed.
 - [UHD And Disc Size Targets](#uhd-and-disc-size-targets)
 - [Named Presets](#named-presets)
 - [Clip And Quality Overrides](#clip-and-quality-overrides)
+- [Optional Post-Processing](#optional-post-processing)
 - [VLC Compatibility Fixes](#vlc-compatibility-fixes)
 - [Normal Validation](#normal-validation)
 - [Automated Support Reports](#automated-support-reports)
@@ -54,7 +55,8 @@ guaranteed.
 - Output: a smaller full-disc folder backup with menus, extras, playlists,
   BD-J, chapters, subtitles, and navigation metadata preserved.
 - Video: non-HEVC clips longer than 10 seconds are reencoded to HEVC/H.265; the
-  default workflow keeps the source resolution and does not upscale.
+  default workflow keeps the source resolution and does not upscale. Optional
+  deinterlacing can be enabled for interlaced source clips.
 - Audio: passed through by default, with optional compact AC-3 stereo/mono for
   storage-limited collections.
 - Not included: decryption, keys, ripping from protected discs, downloads, or
@@ -99,6 +101,7 @@ BD2HEVC would use:
 
 ```bash
 python bd2hevc.py clips "MY_DISC_BACKUP"
+python bd2hevc.py clips "MY_DISC_BACKUP" --deinterlace auto
 ```
 
 The foreground command prints progress automatically and ends with a short
@@ -118,11 +121,12 @@ python bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --encoder h
 
 Full-disc conversion uses a small encode-to-mux queue for hardware HEVC
 encoders: one clip encodes while the single muxer finishes earlier clips. When
-`--audio-mode compact-stereo` is also enabled, compact audio gets its own middle
-stage so audio for the next clip can transcode while the previous clip is
-muxing. CPU `libx265` stays serial. Use `--no-encode-ahead` to disable that
+`--audio-mode compact-stereo` is also enabled, compact audio gets its own
+independent lane. The video lane and audio lane advance separately, and a clip
+enters the single mux lane as soon as that clip's video and audio outputs are
+both ready. CPU `libx265` stays serial. Use `--no-encode-ahead` to disable that
 pipeline even with hardware encoding, or `--encode-ahead-depth 1` to allow only
-one completed encode to wait for later stages.
+one completed output per lane to wait for later stages.
 
 ## Background Jobs
 
@@ -345,6 +349,13 @@ python bd2hevc.py clips "BD backups\Movie Disc" --preset source-mix
 python bd2hevc.py auto "BD backups\Movie Disc" --preset source-mix
 ```
 
+For older extras-heavy discs with interlaced bonus clips:
+
+```bash
+python bd2hevc.py preset save old-extras --quality balanced --deinterlace auto
+python bd2hevc.py queue "BD backups\Movie Disc" --output-dir "Converted UHD-BD" --preset old-extras
+```
+
 Manage presets with:
 
 ```bash
@@ -383,12 +394,12 @@ Example output:
 
 ```text
 BD2HEVC clips for Episode Disc
-clip         duration action       source     output   src Mbps  quality
------------- -------- ------------ ---------- -------- --------  ------------------------
-00001.m2ts   00:24:02 reencode     h264       hevc        18.7  cq:18 (compact-cq)
-00002.m2ts   00:23:55 reencode     h264       hevc        18.1  cq:18 (compact-cq)
-00003.m2ts   00:02:14 copy         mpeg2video mpeg2video   4.4  copy
-00004.m2ts   00:00:07 copy         h264       h264         2.1  copy
+clip         duration action       source     field   output   src Mbps  quality
+------------ -------- ------------ ---------- ------- -------- --------  ------------------------
+00001.m2ts   00:24:02 reencode     h264       prog    hevc        18.7  cq:18 (compact-cq)
+00002.m2ts   00:23:55 reencode     h264       prog    hevc        18.1  cq:18 (compact-cq)
+00003.m2ts   00:02:14 copy         mpeg2video tt      mpeg2video   4.4  copy
+00004.m2ts   00:00:07 copy         h264       prog    h264         2.1  copy
 ```
 
 Use any quality for the main title:
@@ -454,6 +465,49 @@ using stereo for multi-channel sources and mono for mono sources. PGS subtitles
 are still preserved from the source clip. Defaults are `256k` for stereo and
 `128k` for mono; adjust them with `--stereo-audio-bitrate` and
 `--mono-audio-bitrate`. Audio passthrough remains the default.
+
+## Optional Post-Processing
+
+BD2HEVC preserves source pixels by default. Optional deinterlacing is available
+for older extras, SD bonus material, and other clips that are visibly combed in
+players:
+
+```bash
+python bd2hevc.py clips "Disc" --deinterlace auto
+python bd2hevc.py queue "Disc" --output-dir "Converted UHD-BD" --deinterlace auto
+```
+
+`--deinterlace auto` uses FFprobe stream metadata such as `field_order=tt` or
+`field_order=bb`; it does not try to guess from image content. This is
+intentional. Pixel-analysis detectors can mistake progressive, telecined, or
+noisy material for interlacing, and deinterlacing those clips can soften detail
+or damage motion cadence. Auto mode is therefore opt-in and conservative.
+
+The `clips` command shows the detected field order and marks planned clips with
+`; deinterlace` when they will be filtered:
+
+```text
+BD2HEVC clips for The Matrix
+clip         duration action       source     field   output   src Mbps  quality
+------------ -------- ------------ ---------- ------- -------- --------  ------------------------
+00043.m2ts   02:02:50 reencode     vc1        tt      hevc       4.359  2.0 Mbps (balanced); deinterlace
+```
+
+Deinterlacing is applied only to clips that are being reencoded. Copied clips
+stay byte-for-byte source video. Use manual clip overrides when the metadata is
+wrong or missing:
+
+```bash
+python bd2hevc.py queue "Disc" --output-dir "Converted UHD-BD" --deinterlace-clips 00043
+python bd2hevc.py queue "Disc" --output-dir "Converted UHD-BD" --deinterlace auto --no-deinterlace-clips 00012
+```
+
+The default filter is `bwdif` in same-frame-rate mode so clip timing and
+playlist progress stay aligned. `yadif` is available as a fallback:
+
+```bash
+python bd2hevc.py auto "Disc" --deinterlace auto --deinterlace-filter yadif
+```
 
 ## VLC Compatibility Fixes
 
@@ -836,7 +890,8 @@ python bd2hevc.py auto "Disc" --preset-file examples/bitrate/source-ratio-by-cod
 Preset files can set `mode`, `hevc_bitrate_factor` or `factor`,
 `min_video_bitrate`, `max_video_bitrate`, `maxrate_multiplier`,
 `bufsize_multiplier`, `keep_source_padding`, `compact_cq_value`,
-`compact_cq_min_duration`, and `codec_source_ratios`.
+`compact_cq_min_duration`, `codec_source_ratios`, `deinterlace`,
+`deinterlace_filter`, `deinterlace_clips`, and `no_deinterlace_clips`.
 Non-default CLI flags still work for one-off overrides. For example, a preset
 can hold the normal source ratios while a command line can temporarily add or
 replace one codec ratio with `--codec-source-ratio mpeg2video=0.28`.

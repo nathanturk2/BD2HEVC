@@ -333,6 +333,14 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     copy_clips = flatten_cli_values(getattr(args, "copy_clips", None))
     if copy_clips:
         argv.extend(["--copy-clips", *copy_clips])
+    append_option(argv, "--deinterlace", getattr(args, "deinterlace", "off"), "off")
+    append_option(argv, "--deinterlace-filter", getattr(args, "deinterlace_filter", "bwdif"), "bwdif")
+    deinterlace_clips = flatten_cli_values(getattr(args, "deinterlace_clips", None))
+    if deinterlace_clips:
+        argv.extend(["--deinterlace-clips", *deinterlace_clips])
+    no_deinterlace_clips = flatten_cli_values(getattr(args, "no_deinterlace_clips", None))
+    if no_deinterlace_clips:
+        argv.extend(["--no-deinterlace-clips", *no_deinterlace_clips])
     append_option(argv, "--audio-mode", getattr(args, "audio_mode", DEFAULT_AUDIO_MODE), DEFAULT_AUDIO_MODE)
     append_option(argv, "--stereo-audio-bitrate", getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE), DEFAULT_STEREO_AUDIO_BITRATE)
     append_option(argv, "--mono-audio-bitrate", getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE), DEFAULT_MONO_AUDIO_BITRATE)

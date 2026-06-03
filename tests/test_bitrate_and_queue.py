@@ -4,6 +4,7 @@ import io
 import os
 import subprocess
 import json
+import threading
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -46,6 +47,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("--top-n-quality", clips_help)
         self.assertIn("--clip-quality", clips_help)
         self.assertIn("--keep-source-padding", clips_help)
+        self.assertIn("--deinterlace", clips_help)
 
         with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
             with self.assertRaises(SystemExit) as raised:
@@ -215,6 +217,26 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("stage: audio + encoding", lines[0])
         self.assertTrue(any(line.startswith("audio:") and "25.0%" in line for line in lines))
         self.assertTrue(any(line.startswith("encoding:") and "20.0%" in line for line in lines))
+
+    def test_progress_keeps_audio_speed_out_of_encode_speed(self) -> None:
+        with TemporaryDirectory() as temp:
+            log = Path(temp) / "job.log"
+            log.write_text(
+                "\n".join(
+                    [
+                        "BD2HEVC_PROGRESS encode-start 00001.m2ts",
+                        "frame= 100 time=00:00:10.00 speed=3.0x",
+                        "BD2HEVC_PROGRESS audio-start 00001.m2ts",
+                        "size= 1000KiB time=00:01:00.00 bitrate=256.0kbits/s speed=50.0x",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            state = progress.latest_log_progress(log)
+
+        self.assertEqual(state["encode_speed"], "3.0x")
+        self.assertEqual(state["audio_speed"], "50.0x")
 
 
 class BitratePresetTests(unittest.TestCase):
@@ -424,6 +446,8 @@ class BitratePresetTests(unittest.TestCase):
                     "h264=0.55",
                     "--codec-source-ratio",
                     "mpeg2video=0.30",
+                    "--deinterlace",
+                    "auto",
                     "--audio-mode",
                     "compact-stereo",
                 ]
@@ -439,6 +463,7 @@ class BitratePresetTests(unittest.TestCase):
             self.assertEqual(saved["quality"], "source-ratio:0.60")
             self.assertEqual(saved["main_title_quality"], "cq:18")
             self.assertEqual(saved["codec_source_ratios"], {"h264": 0.55, "mpeg2video": 0.30})
+            self.assertEqual(saved["deinterlace"], "auto")
             self.assertEqual(saved["audio_mode"], "compact-stereo")
 
             auto_args = parser.parse_args(["auto", "Disc", "--preset", "sarah", "--codec-source-ratio", "mpeg2video=0.28"])
@@ -447,6 +472,7 @@ class BitratePresetTests(unittest.TestCase):
 
             self.assertEqual(auto_args.quality, "source-ratio:0.60")
             self.assertEqual(auto_args.main_title_quality, "cq:18")
+            self.assertEqual(auto_args.deinterlace, "auto")
             self.assertEqual(auto_args.audio_mode, "compact-stereo")
             self.assertEqual(options["factor_override"], 0.60)
             self.assertEqual(options["codec_factor_overrides"], {"h264": 0.55, "mpeg2video": 0.28})
@@ -597,6 +623,16 @@ class CopyPlanningTests(unittest.TestCase):
                 with self.assertRaisesRegex(bd.ToolError, "Output drive or root does not exist"):
                     bd.make_output_available(missing, source, force=False)
 
+    def test_ffprobe_stream_query_preserves_field_order(self) -> None:
+        class Result:
+            stdout = '{"streams": []}'
+
+        with mock.patch.object(scan, "run_cmd", return_value=Result()) as mocked:
+            scan.ffprobe_streams(Path("clip.m2ts"), {"ffprobe": "ffprobe"})
+
+        cmd = mocked.call_args.args[0]
+        self.assertIn("field_order", cmd[cmd.index("-show_entries") + 1])
+
 
 class CommandConstructionTests(unittest.TestCase):
     def test_compact_cq_nvenc_uses_lean_handbrake_like_cq(self) -> None:
@@ -626,6 +662,33 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertNotIn("-maxrate:v:0", cmd)
         self.assertNotIn("-bufsize:v:0", cmd)
         self.assertNotIn("-bluray-compat", cmd)
+
+    def test_deinterlace_postprocess_adds_same_rate_filter(self) -> None:
+        clip_info = {
+            "video": {
+                "fps": 29.97,
+                "postprocess": {"deinterlace": {"enabled": True}},
+                "target_hevc": {
+                    "mode": "balanced",
+                    "rate_control": "vbr",
+                    "target_bps": 5_000_000,
+                    "maxrate_bps": 8_000_000,
+                    "bufsize_bps": 16_000_000,
+                },
+            }
+        }
+        cmd = bd.encode_to_hevc_m2ts(
+            Path("in.m2ts"),
+            Path("out.m2ts"),
+            clip_info,
+            {"ffmpeg": "ffmpeg"},
+            deinterlace_filter="bwdif",
+            dry_run=True,
+        )
+
+        self.assertIn("-vf", cmd)
+        vf_index = cmd.index("-vf")
+        self.assertIn("bwdif=mode=send_frame:parity=auto:deint=all", cmd[vf_index + 1])
 
     def test_compact_stereo_audio_reencodes_audio_without_subtitles_in_temp_media(self) -> None:
         clip_info = {
@@ -899,6 +962,37 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual(clips[0]["action"], "copy")
         self.assertEqual(report["clips"][0]["quality"], "copy")
 
+    def test_deinterlace_auto_selects_metadata_interlaced_reencode_clip(self) -> None:
+        clips = [{"file": "00043.m2ts", "action": "reencode", "video": {"field_order": "tt"}}]
+        args = argparse.Namespace(
+            deinterlace="auto",
+            deinterlace_filter="bwdif",
+            deinterlace_clips=None,
+            no_deinterlace_clips=None,
+        )
+
+        report = bd.apply_deinterlace_plan(clips, args)
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report["matched_count"], 1)
+        self.assertTrue(clips[0]["video"]["postprocess"]["deinterlace"]["enabled"])
+        self.assertEqual(clips[0]["video"]["postprocess"]["deinterlace"]["filter"], "bwdif")
+
+    def test_deinterlace_auto_ignores_progressive_metadata(self) -> None:
+        clips = [{"file": "00001.m2ts", "action": "reencode", "video": {"field_order": "progressive"}}]
+        args = argparse.Namespace(
+            deinterlace="auto",
+            deinterlace_filter="bwdif",
+            deinterlace_clips=None,
+            no_deinterlace_clips=None,
+        )
+
+        report = bd.apply_deinterlace_plan(clips, args)
+
+        self.assertIsNotNone(report)
+        self.assertEqual(report["matched_count"], 0)
+        self.assertNotIn("postprocess", clips[0]["video"])
+
     def test_qsv_rejects_cq_quality_overrides(self) -> None:
         args = argparse.Namespace(
             encoder="hevc_qsv",
@@ -1140,6 +1234,10 @@ class CommandConstructionTests(unittest.TestCase):
             clip_bitrate_mode=None,
             clip_cq=[["00013", "20"]],
             copy_clips=[["00014", "00015.m2ts"]],
+            deinterlace="auto",
+            deinterlace_filter="yadif",
+            deinterlace_clips=[["00016"]],
+            no_deinterlace_clips=[["00017"]],
             audio_mode=config.DEFAULT_AUDIO_MODE,
             stereo_audio_bitrate=256_000,
             mono_audio_bitrate=128_000,
@@ -1162,11 +1260,23 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("--copy-clips", cmd)
         copy_index = cmd.index("--copy-clips")
         self.assertEqual(cmd[copy_index + 1 : copy_index + 3], ["00014", "00015.m2ts"])
+        self.assertIn("--deinterlace", cmd)
+        deinterlace_index = cmd.index("--deinterlace")
+        self.assertEqual(cmd[deinterlace_index + 1], "auto")
+        self.assertIn("--deinterlace-filter", cmd)
+        filter_index = cmd.index("--deinterlace-filter")
+        self.assertEqual(cmd[filter_index + 1], "yadif")
+        self.assertIn("--deinterlace-clips", cmd)
+        deinterlace_clips_index = cmd.index("--deinterlace-clips")
+        self.assertEqual(cmd[deinterlace_clips_index + 1], "00016")
+        self.assertIn("--no-deinterlace-clips", cmd)
+        no_deinterlace_clips_index = cmd.index("--no-deinterlace-clips")
+        self.assertEqual(cmd[no_deinterlace_clips_index + 1], "00017")
         first_ratio_index = cmd.index("--codec-source-ratio")
         self.assertEqual(cmd[first_ratio_index + 1], "h264=0.55")
         self.assertEqual(cmd[first_ratio_index + 3], "mpeg2=0.30")
 
-    def test_compact_audio_pipeline_runs_audio_before_mux_per_clip(self) -> None:
+    def test_compact_audio_pipeline_muxes_after_video_and_audio_are_ready(self) -> None:
         args = argparse.Namespace(encode_ahead_depth=2, audio_mode="compact-stereo")
         contexts = [
             {"file": "00001.m2ts", "clip": {"duration": 1.0}},
@@ -1204,9 +1314,53 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertEqual([item["file"] for item in validations], ["00001.m2ts", "00002.m2ts"])
         self.assertEqual(done_seconds, 3.0)
         for clip_file in ("00001.m2ts", "00002.m2ts"):
-            clip_events = [index for index, event in enumerate(events) if event[1] == clip_file]
-            self.assertEqual([events[index][0] for index in clip_events], ["encode", "audio", "mux"])
-        progress_event.assert_any_call("pipeline", "enabled", mode="encode-audio-mux-queue", depth=2)
+            encode_index = events.index(("encode", clip_file))
+            audio_index = events.index(("audio", clip_file))
+            mux_index = events.index(("mux", clip_file))
+            self.assertLess(encode_index, mux_index)
+            self.assertLess(audio_index, mux_index)
+        progress_event.assert_any_call("pipeline", "enabled", mode="video-audio-mux-queue", depth=2)
+
+    def test_compact_audio_pipeline_can_overlap_audio_with_video(self) -> None:
+        args = argparse.Namespace(encode_ahead_depth=2, audio_mode="compact-stereo")
+        contexts = [{"file": "00001.m2ts", "clip": {"duration": 1.0}}]
+        audio_started = threading.Event()
+        events: list[tuple[str, str]] = []
+
+        def fake_encode(ctx: dict, tools: dict, args: argparse.Namespace) -> dict:
+            events.append(("encode-start", ctx["file"]))
+            self.assertTrue(audio_started.wait(timeout=1.0))
+            events.append(("encode-done", ctx["file"]))
+            return ctx
+
+        def fake_audio(ctx: dict, tools: dict, args: argparse.Namespace) -> dict:
+            events.append(("audio-start", ctx["file"]))
+            audio_started.set()
+            events.append(("audio-done", ctx["file"]))
+            return ctx
+
+        def fake_mux(ctx: dict, tools: dict, args: argparse.Namespace) -> dict:
+            events.append(("mux", ctx["file"]))
+            return {"file": ctx["file"]}
+
+        with (
+            mock.patch.object(bd, "encode_clone_clip_context", side_effect=fake_encode),
+            mock.patch.object(bd, "transcode_compact_audio_context", side_effect=fake_audio),
+            mock.patch.object(bd, "mux_validate_clone_clip_context", side_effect=fake_mux),
+            mock.patch.object(bd, "emit_conversion_progress"),
+            mock.patch.object(bd, "progress_event"),
+        ):
+            bd.run_queued_encode_audio_mux_pipeline(
+                contexts,
+                {},
+                args,
+                total_seconds=1.0,
+                progress_enabled=False,
+            )
+
+        self.assertLess(events.index(("audio-start", "00001.m2ts")), events.index(("encode-done", "00001.m2ts")))
+        self.assertLess(events.index(("encode-done", "00001.m2ts")), events.index(("mux", "00001.m2ts")))
+        self.assertLess(events.index(("audio-done", "00001.m2ts")), events.index(("mux", "00001.m2ts")))
 
     def test_job_loader_skips_transient_empty_job_files(self) -> None:
         with TemporaryDirectory() as temp:

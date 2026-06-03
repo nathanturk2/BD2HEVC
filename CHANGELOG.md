@@ -27,6 +27,8 @@
 - Added adjustable HEVC bitrate presets and manual bitrate controls.
 - Added MPEG-2-aware HEVC bitrate estimation so MPEG-2 clips selected for
   reencoding do not inherit bogus Blu-ray CPB ceiling bitrates.
+- Added optional metadata-driven deinterlacing for reencoded clips, with
+  `--deinterlace auto`, manual clip include/exclude flags, and preset support.
 - Added sparse menu/gallery timing detection so long still-like clips are
   expanded to their source duration instead of collapsing to decoded frames.
 - Sparse menu/gallery replacements now use no-B-frame HEVC to reduce VLC/D3D11
@@ -73,8 +75,9 @@
   instead of appearing to wait only behind the current running job.
 - Added command-specific CLI help examples, with top-level `--help` pointing
   users to `py bd2hevc.py <command> --help`.
-- Added a hardware encode-ahead compact-audio pipeline so compact stereo audio
-  for the next clip can be transcoded while the previous clip is muxing.
+- Added a hardware compact-audio dependency pipeline with independent video and
+  audio lanes, feeding a single mux lane once each clip's pair of outputs is
+  ready.
 - Added `--top-n-cq COUNT CQ` for episode discs, letting the longest reencoded
   CQ clips use a different CQ from extras; mutually exclusive with
   `--main-title-cq`.

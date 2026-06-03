@@ -20,6 +20,8 @@ from .config import (
     DEFAULT_AUDIO_MODE,
     DEFAULT_MONO_AUDIO_BITRATE,
     DEFAULT_STEREO_AUDIO_BITRATE,
+    DEINTERLACE_FILTERS,
+    DEINTERLACE_MODES,
     HEVC_ENCODERS,
     ROOT,
 )
@@ -226,6 +228,21 @@ def apply_named_preset_to_args(args: argparse.Namespace) -> dict[str, Any] | Non
     set_if_default(args, "clip_cq", pair_list_value(data["clip_cq"], "clip_cq") if "clip_cq" in data else None, None)
     set_if_default(args, "copy_clips", clip_list_value(data["copy_clips"], "copy_clips") if "copy_clips" in data else None, None)
 
+    if hasattr(args, "deinterlace"):
+        deinterlace = first_present(data, "deinterlace")
+        if deinterlace is not None and deinterlace not in DEINTERLACE_MODES:
+            raise ToolError(f"Preset deinterlace must be one of: {', '.join(DEINTERLACE_MODES)}")
+        set_if_default(args, "deinterlace", deinterlace, "off")
+    if hasattr(args, "deinterlace_filter"):
+        deinterlace_filter = first_present(data, "deinterlace_filter")
+        if deinterlace_filter is not None and deinterlace_filter not in DEINTERLACE_FILTERS:
+            raise ToolError(f"Preset deinterlace_filter must be one of: {', '.join(DEINTERLACE_FILTERS)}")
+        set_if_default(args, "deinterlace_filter", deinterlace_filter, "bwdif")
+    if hasattr(args, "deinterlace_clips"):
+        set_if_default(args, "deinterlace_clips", clip_list_value(data["deinterlace_clips"], "deinterlace_clips") if "deinterlace_clips" in data else None, None)
+    if hasattr(args, "no_deinterlace_clips"):
+        set_if_default(args, "no_deinterlace_clips", clip_list_value(data["no_deinterlace_clips"], "no_deinterlace_clips") if "no_deinterlace_clips" in data else None, None)
+
     if hasattr(args, "audio_mode"):
         set_if_default(args, "audio_mode", first_present(data, "audio_mode"), DEFAULT_AUDIO_MODE)
     if hasattr(args, "stereo_audio_bitrate") and (value := first_present(data, "stereo_audio_bitrate")) is not None:
@@ -276,6 +293,10 @@ def preset_data_from_args(args: argparse.Namespace) -> dict[str, Any]:
     put_if_set(data, "clip_bitrate_mode", getattr(args, "clip_bitrate_mode", None))
     put_if_set(data, "clip_cq", getattr(args, "clip_cq", None))
     put_if_set(data, "copy_clips", getattr(args, "copy_clips", None))
+    put_if_set(data, "deinterlace", getattr(args, "deinterlace", "off"), "off")
+    put_if_set(data, "deinterlace_filter", getattr(args, "deinterlace_filter", "bwdif"), "bwdif")
+    put_if_set(data, "deinterlace_clips", getattr(args, "deinterlace_clips", None))
+    put_if_set(data, "no_deinterlace_clips", getattr(args, "no_deinterlace_clips", None))
     put_if_set(data, "audio_mode", getattr(args, "audio_mode", DEFAULT_AUDIO_MODE), DEFAULT_AUDIO_MODE)
     put_if_set(data, "stereo_audio_bitrate", getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE), DEFAULT_STEREO_AUDIO_BITRATE)
     put_if_set(data, "mono_audio_bitrate", getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE), DEFAULT_MONO_AUDIO_BITRATE)

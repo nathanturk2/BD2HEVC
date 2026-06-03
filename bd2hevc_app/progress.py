@@ -123,13 +123,15 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
         encode_segment = marker_segment("encode-start", active_encode, {"encode-done", "encode-failed"})
         audio_segment = marker_segment("audio-start", active_audio, {"audio-done", "audio-failed"})
         mux_segment = marker_segment("mux-start", active_mux, {"mux-done", "mux-failed"})
-        encode_times = re.findall(r"(?:^|[\r\n])\s*frame=.*?time=(\d{2}:\d{2}:\d{2}\.\d{2})", encode_segment)
+        encode_lines = re.findall(r"(?:^|[\r\n])\s*(frame=.*?)(?=[\r\n]|$)", encode_segment)
+        encode_text = "\n".join(encode_lines)
+        encode_times = re.findall(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", encode_text)
         encode_seconds = parse_timecode(encode_times[-1]) if encode_times else None
         audio_times = re.findall(r"(?:^|[\r\n])\s*size=.*?time=(\d{2}:\d{2}:\d{2}\.\d{2})", audio_segment)
         audio_seconds = parse_timecode(audio_times[-1]) if audio_times else None
         mux_matches = re.findall(r"(?:^|[\r\n])\s*(\d+(?:\.\d+)?)%\s+complete\s*(?=[\r\n]|$)", mux_segment)
         mux_percent = safe_float(mux_matches[-1]) if mux_matches else None
-        speed_matches = re.findall(r"speed=\s*([0-9.]+x)", encode_segment)
+        speed_matches = re.findall(r"speed=\s*([0-9.]+x)", encode_text)
         encode_speed = speed_matches[-1] if speed_matches else None
         audio_speed_matches = re.findall(r"(?:^|[\r\n])\s*size=.*?speed=\s*([0-9.]+x)", audio_segment)
         audio_speed = audio_speed_matches[-1] if audio_speed_matches else None
