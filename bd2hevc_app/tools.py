@@ -151,14 +151,21 @@ def run_cmd(
     cwd: Path | None = None,
     timeout_seconds: float | None = None,
     verbose: bool = False,
+    env_overrides: dict[str, str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if verbose:
         print("+ " + format_cmd(cmd), flush=True)
+    env = refreshed_env()
+    for key, value in (env_overrides or {}).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = str(value)
     try:
         result = subprocess.run(
             cmd,
             cwd=str(cwd) if cwd else None,
-            env=refreshed_env(),
+            env=env,
             text=True,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE if capture else sys.stderr,

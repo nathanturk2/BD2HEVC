@@ -36,13 +36,15 @@ UHD_BDMV_DIRS = [
     Path("CERTIFICATE") / "BACKUP",
 ]
 
-VERSION_PATCHES = {
+VERSION_PATCHES_TO_UHD = {
     b"INDX0200": b"INDX0300",
     b"MOBJ0200": b"MOBJ0300",
     b"BDJO0200": b"BDJO0300",
     b"MPLS0200": b"MPLS0300",
     b"HDMV0200": b"HDMV0300",
 }
+
+VERSION_PATCHES_TO_BD = {new: old for old, new in VERSION_PATCHES_TO_UHD.items()}
 
 
 def parse_disc_size(value: str | int | float | None) -> int | None:
@@ -234,17 +236,20 @@ def fit_reencoded_clips_to_disc_size(
     return report
 
 
-def patch_version_header(path: Path) -> dict[str, Any]:
+def patch_version_header(path: Path, *, target: str = "uhd") -> dict[str, Any]:
     if not path.exists() or not path.is_file():
         return {"file": str(path), "exists": False, "patched": False}
+    if target not in {"uhd", "bd"}:
+        raise ToolError("Version header target must be 'uhd' or 'bd'")
+    patches = VERSION_PATCHES_TO_UHD if target == "uhd" else VERSION_PATCHES_TO_BD
     data = path.read_bytes()
-    for old, new in VERSION_PATCHES.items():
+    for old, new in patches.items():
         if data.startswith(old):
             if old == new:
                 break
             path.write_bytes(new + data[len(new) :])
-            return {"file": str(path), "exists": True, "patched": True, "old": old.decode(), "new": new.decode()}
-    return {"file": str(path), "exists": True, "patched": False, "header": data[:8].decode("ascii", errors="replace")}
+            return {"file": str(path), "exists": True, "patched": True, "target": target, "old": old.decode(), "new": new.decode()}
+    return {"file": str(path), "exists": True, "patched": False, "target": target, "header": data[:8].decode("ascii", errors="replace")}
 
 
 def mirror_if_missing(primary: Path, backup: Path) -> dict[str, Any]:
@@ -267,7 +272,7 @@ def mirror_directory_files_if_missing(primary_dir: Path, backup_dir: Path, patte
     return reports
 
 
-def ensure_uhd_backup_structure(root: Path) -> dict[str, Any]:
+def ensure_uhd_backup_structure(root: Path, *, patch_version_headers: bool = False) -> dict[str, Any]:
     root = root.resolve()
     created_dirs = []
     for relative in UHD_BDMV_DIRS:
@@ -298,7 +303,8 @@ def ensure_uhd_backup_structure(root: Path) -> dict[str, Any]:
     version_files.extend((root / "BDMV" / "BACKUP" / "PLAYLIST").glob("*.mpls"))
     version_files.extend((root / "BDMV" / "CLIPINF").glob("*.clpi"))
     version_files.extend((root / "BDMV" / "BACKUP" / "CLIPINF").glob("*.clpi"))
-    versions = [patch_version_header(path) for path in version_files]
+    version_target = "uhd" if patch_version_headers else "bd"
+    versions = [patch_version_header(path, target=version_target) for path in version_files]
 
     required_files = [
         root / "BDMV" / "index.bdmv",
@@ -313,6 +319,7 @@ def ensure_uhd_backup_structure(root: Path) -> dict[str, Any]:
         "root": str(root),
         "created_dirs": created_dirs,
         "mirrored": mirrored,
+        "version_header_target": version_target,
         "version_patches": versions,
         "missing_required_files": missing_required,
         "certificate": {

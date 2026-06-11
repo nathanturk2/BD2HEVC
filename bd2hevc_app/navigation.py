@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import json
 from pathlib import Path
 from typing import Any
 
@@ -38,13 +39,77 @@ def replace_in_range(data: bytearray, start: int, end: int, old: bytes, new: byt
     return count
 
 
-def patch_clpi_for_hevc(path: Path) -> dict[str, Any]:
+def parse_mpls_play_items(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    data = path.read_bytes()
+    if not data.startswith(b"MPLS") or len(data) < 20:
+        return []
+    playlist_start = read_be32(data, 8)
+    if playlist_start <= 0 or playlist_start + 10 > len(data):
+        return []
+    playlist_length = read_be32(data, playlist_start)
+    playlist_end = min(len(data), playlist_start + 4 + playlist_length)
+    item_count = read_be16(data, playlist_start + 6)
+    pos = playlist_start + 10
+    items: list[dict[str, Any]] = []
+    for index in range(item_count):
+        if pos + 2 > playlist_end:
+            break
+        item_length = read_be16(data, pos)
+        item_end = min(len(data), pos + 2 + item_length)
+        clip_id = data[pos + 2 : pos + 7].decode("ascii", errors="ignore") if pos + 7 <= item_end else ""
+        in_time = read_be32(data, pos + 14) if pos + 18 <= item_end else None
+        out_time = read_be32(data, pos + 18) if pos + 22 <= item_end else None
+        duration = None
+        if in_time is not None and out_time is not None and out_time >= in_time:
+            duration = (out_time - in_time) / 45_000.0
+        items.append(
+            {
+                "index": index,
+                "clip_id": clip_id,
+                "in_time": in_time,
+                "out_time": out_time,
+                "duration": duration,
+            }
+        )
+        pos = item_end
+    return items
+
+
+def short_repeated_playitem_clips(disc_root: Path, clip_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
+    bdmv = disc_root / "BDMV"
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    playlist_dir = bdmv / "PLAYLIST"
+    if not playlist_dir.is_dir():
+        return candidates
+    for playlist in sorted(playlist_dir.glob("*.mpls")):
+        items = parse_mpls_play_items(playlist)
+        by_clip: dict[str, list[dict[str, Any]]] = {}
+        for item in items:
+            clip_id = str(item.get("clip_id") or "")
+            if clip_id in clip_ids:
+                by_clip.setdefault(clip_id, []).append(item)
+        for clip_id, clip_items in by_clip.items():
+            durations = [float(item["duration"]) for item in clip_items if item.get("duration") is not None]
+            if len(clip_items) >= 3 and durations and max(durations) <= 5.0:
+                candidates.setdefault(clip_id, []).append(
+                    {
+                        "playlist": str(playlist),
+                        "playitem_count": len(clip_items),
+                        "max_playitem_seconds": max(durations),
+                    }
+                )
+    return candidates
+
+
+def patch_clpi_for_hevc(path: Path, *, patch_version_headers: bool = False) -> dict[str, Any]:
     if not path.exists():
         return {"file": str(path), "exists": False, "patched": False}
     data = bytearray(path.read_bytes())
     original = bytes(data)
     version_changed = False
-    if data.startswith(b"HDMV0200"):
+    if patch_version_headers and data.startswith(b"HDMV0200"):
         data[4:8] = b"0300"
         version_changed = True
     stream_patches = 0
@@ -244,7 +309,101 @@ def build_scaled_cpi_refs(scaled_entries: list[tuple[int, int, int]], coarse_cou
     return refs
 
 
-def scale_clpi_cpi_map_to_stream(source_clip: Path, output_clip: Path, output_clpi: Path) -> dict[str, Any]:
+def output_video_keyframe_spns(output_clip: Path, tools: dict[str, Any]) -> dict[str, Any]:
+    ffprobe = require_tool(tools, "ffprobe")
+    result = run_cmd(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-skip_frame",
+            "nokey",
+            "-show_entries",
+            "frame=pkt_pos,best_effort_timestamp_time,pts_time,pict_type",
+            "-of",
+            "json",
+            str(output_clip),
+        ],
+        check=True,
+        capture=True,
+    )
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ToolError(f"Could not parse ffprobe keyframe output for {output_clip}") from exc
+    keyframes: list[dict[str, Any]] = []
+    for frame in payload.get("frames") or []:
+        pos = frame.get("pkt_pos")
+        if pos is None:
+            continue
+        timestamp = frame.get("best_effort_timestamp_time") or frame.get("pts_time")
+        keyframes.append(
+            {
+                "spn": int(pos) // 192,
+                "timestamp": float(timestamp) if timestamp is not None else None,
+                "pict_type": frame.get("pict_type"),
+            }
+        )
+    return {"clip": str(output_clip), "keyframes": keyframes, "keyframe_count": len(keyframes)}
+
+
+def actual_keyframe_spn_entries(
+    actual_entries: list[tuple[int, int, int]],
+    keyframes: list[dict[str, Any]],
+) -> list[tuple[int, int, int]] | None:
+    if not actual_entries:
+        return []
+    surplus = len(keyframes) - len(actual_entries)
+    allowed_surplus = max(1, int(len(actual_entries) * 0.05))
+    if surplus < 0 or surplus > allowed_surplus:
+        return None
+    mapped = []
+    previous_spn = -1
+    for index, (fine_index, full_pts, _source_spn) in enumerate(actual_entries):
+        spn = int(keyframes[index]["spn"])
+        if spn < previous_spn:
+            return None
+        mapped.append((fine_index, full_pts, spn))
+        previous_spn = spn
+    return mapped
+
+
+def write_cpi_spn_entries(data: bytearray, entry: dict[str, Any], mapped_entries: list[tuple[int, int, int]]) -> dict[str, Any]:
+    coarse = entry.get("coarse") or []
+    fine = entry.get("fine") or []
+    refs = build_scaled_cpi_refs(mapped_entries, len(coarse), len(fine))
+    mapped_by_fine = {fine_index: (full_pts, spn) for fine_index, full_pts, spn in mapped_entries}
+    approximated_fine_entries = 0
+    for coarse_index, coarse_item in enumerate(coarse):
+        ref = refs[coarse_index]
+        next_ref = refs[coarse_index + 1] if coarse_index + 1 < len(refs) else len(fine)
+        full_pts, first_spn = mapped_by_fine[ref]
+        base_spn = first_spn & ~CLPI_FINE_SPN_MASK
+        write_bits(data, int(coarse_item["bit"]), 18, ref)
+        write_bits(data, int(coarse_item["bit"]) + 18, 14, full_pts >> 11)
+        write_bits(data, int(coarse_item["bit"]) + 32, 32, first_spn)
+        for fine_index in range(ref, next_ref):
+            if fine_index not in mapped_by_fine:
+                continue
+            _, spn = mapped_by_fine[fine_index]
+            low_spn = spn - base_spn
+            if low_spn < 0 or low_spn > CLPI_FINE_SPN_MASK:
+                approximated_fine_entries += 1
+                low_spn = max(0, min(CLPI_FINE_SPN_MASK, low_spn))
+            write_bits(data, int(fine[fine_index]["bit"]) + 15, 17, low_spn)
+    return {"refs": refs, "approximated_fine_entries": approximated_fine_entries}
+
+
+def scale_clpi_cpi_map_to_stream(
+    source_clip: Path,
+    output_clip: Path,
+    output_clpi: Path,
+    *,
+    tools: dict[str, Any] | None = None,
+    prefer_actual_keyframe_spns: bool = False,
+) -> dict[str, Any]:
     if not output_clpi.exists():
         return {"clpi": str(output_clpi), "scaled": False, "missing_clpi": True}
     if not source_clip.exists() or not output_clip.exists():
@@ -264,51 +423,46 @@ def scale_clpi_cpi_map_to_stream(source_clip: Path, output_clip: Path, output_cl
     old_num_source_packets = read_be32(data, CLPI_SOURCE_PACKET_OFFSET)
     ratio = output_packets / source_packets
     entries = parse_clpi_cpi_entries(data)
+    keyframe_report = None
+    keyframes: list[dict[str, Any]] = []
+    if prefer_actual_keyframe_spns and tools:
+        try:
+            keyframe_report = output_video_keyframe_spns(output_clip, tools)
+            keyframes = keyframe_report.get("keyframes") or []
+        except Exception as exc:
+            keyframe_report = {"clip": str(output_clip), "error": str(exc), "keyframes": [], "keyframe_count": 0}
     stream_reports: list[dict[str, Any]] = []
     write_be32(data, CLPI_SOURCE_PACKET_OFFSET, output_packets)
     for entry in entries:
-        coarse = entry.get("coarse") or []
-        fine = entry.get("fine") or []
         actual = clpi_cpi_actual_entries(entry)
         if not actual:
             continue
-        scaled = [
-            (
-                fine_index,
-                full_pts,
-                max(0, min(output_packets - 1, int(round(spn * ratio)))),
-            )
-            for fine_index, full_pts, spn in actual
-        ]
-        refs = build_scaled_cpi_refs(scaled, len(coarse), len(fine))
-        scaled_by_fine = {fine_index: (full_pts, spn) for fine_index, full_pts, spn in scaled}
-        approximated_fine_entries = 0
-        for coarse_index, coarse_item in enumerate(coarse):
-            ref = refs[coarse_index]
-            next_ref = refs[coarse_index + 1] if coarse_index + 1 < len(refs) else len(fine)
-            full_pts, first_spn = scaled_by_fine[ref]
-            base_spn = first_spn & ~CLPI_FINE_SPN_MASK
-            write_bits(data, int(coarse_item["bit"]), 18, ref)
-            write_bits(data, int(coarse_item["bit"]) + 18, 14, full_pts >> 11)
-            write_bits(data, int(coarse_item["bit"]) + 32, 32, first_spn)
-            for fine_index in range(ref, next_ref):
-                if fine_index not in scaled_by_fine:
-                    continue
-                _, spn = scaled_by_fine[fine_index]
-                low_spn = spn - base_spn
-                if low_spn < 0 or low_spn > CLPI_FINE_SPN_MASK:
-                    approximated_fine_entries += 1
-                    low_spn = max(0, min(CLPI_FINE_SPN_MASK, low_spn))
-                write_bits(data, int(fine[fine_index]["bit"]) + 15, 17, low_spn)
+        mapping = "scaled-ratio"
+        mapped = None
+        if keyframes:
+            mapped = actual_keyframe_spn_entries(actual, keyframes)
+            if mapped is not None:
+                mapping = "actual-keyframe-spn"
+        if mapped is None:
+            mapped = [
+                (
+                    fine_index,
+                    full_pts,
+                    max(0, min(output_packets - 1, int(round(spn * ratio)))),
+                )
+                for fine_index, full_pts, spn in actual
+            ]
+        write_report = write_cpi_spn_entries(data, entry, mapped)
         stream_reports.append(
             {
                 "pid": entry.get("pid"),
                 "type": entry.get("type"),
-                "refs": refs,
-                "fine_entries": len(scaled),
-                "approximated_fine_entries": approximated_fine_entries,
-                "min_spn": min(item[2] for item in scaled),
-                "max_spn": max(item[2] for item in scaled),
+                "mapping": mapping,
+                "refs": write_report.get("refs"),
+                "fine_entries": len(mapped),
+                "approximated_fine_entries": write_report.get("approximated_fine_entries"),
+                "min_spn": min(item[2] for item in mapped),
+                "max_spn": max(item[2] for item in mapped),
             }
         )
     output_clpi.write_bytes(data)
@@ -320,6 +474,11 @@ def scale_clpi_cpi_map_to_stream(source_clip: Path, output_clip: Path, output_cl
         "old_num_source_packets": old_num_source_packets,
         "new_num_source_packets": output_packets,
         "streams": stream_reports,
+        "keyframes": {
+            "used": any(item.get("mapping") == "actual-keyframe-spn" for item in stream_reports),
+            "count": (keyframe_report or {}).get("keyframe_count"),
+            "error": (keyframe_report or {}).get("error"),
+        } if keyframe_report is not None else None,
     }
 
 
@@ -416,7 +575,7 @@ def refresh_clpi_cpi_from_m2ts(output_clip: Path, output_clpi: Path, tools: dict
     }
 
 
-def patch_mpls_for_hevc(path: Path, clip_ids: set[str]) -> dict[str, Any]:
+def patch_mpls_for_hevc(path: Path, clip_ids: set[str], *, patch_version_headers: bool = False) -> dict[str, Any]:
     if not path.exists():
         return {"file": str(path), "exists": False, "patched": False}
     data = bytearray(path.read_bytes())
@@ -441,7 +600,7 @@ def patch_mpls_for_hevc(path: Path, clip_ids: set[str]) -> dict[str, Any]:
                     for source_pattern in (MPLS_PRIMARY_VIDEO_AVC, MPLS_PRIMARY_VIDEO_MPEG2):
                         stream_patches += replace_in_range(data, pos, item_end, source_pattern, MPLS_PRIMARY_VIDEO_HEVC)
                 pos = item_end
-    if stream_patches and data.startswith(b"MPLS0200"):
+    if patch_version_headers and stream_patches and data.startswith(b"MPLS0200"):
         data[4:8] = b"0300"
     if data != original:
         path.write_bytes(data)
@@ -462,11 +621,18 @@ def patch_navigation_for_hevc(
     tools: dict[str, Any] | None = None,
     source_root: Path | None = None,
     refresh_cpi: bool = False,
+    patch_version_headers: bool = False,
     verbose: bool = False,
 ) -> dict[str, Any]:
     clip_ids = {Path(name).stem for name in clip_files}
     bdmv = disc_root / "BDMV"
-    report: dict[str, Any] = {"clips": sorted(clip_ids), "clpi": [], "mpls": []}
+    actual_spn_candidates = short_repeated_playitem_clips(disc_root, clip_ids)
+    report: dict[str, Any] = {
+        "clips": sorted(clip_ids),
+        "clpi": [],
+        "mpls": [],
+        "actual_keyframe_spn_candidates": actual_spn_candidates,
+    }
     for rel in (Path("CLIPINF"), Path("BACKUP") / "CLIPINF"):
         folder = bdmv / rel
         for clip_id in sorted(clip_ids):
@@ -474,9 +640,16 @@ def patch_navigation_for_hevc(
             if source_root:
                 source_clip = source_root / "BDMV" / "STREAM" / f"{clip_id}.m2ts"
                 output_clip = bdmv / "STREAM" / f"{clip_id}.m2ts"
-                item = restore_source_clpi(source_clip, clpi_path, output_clip=output_clip)
+                item = restore_source_clpi(
+                    source_clip,
+                    clpi_path,
+                    output_clip=output_clip,
+                    patch_version_headers=patch_version_headers,
+                    tools=tools,
+                    prefer_actual_keyframe_spns=clip_id in actual_spn_candidates,
+                )
             else:
-                item = patch_clpi_for_hevc(clpi_path)
+                item = patch_clpi_for_hevc(clpi_path, patch_version_headers=patch_version_headers)
             if refresh_cpi and tools and clpi_path.exists():
                 stream_path = bdmv / "STREAM" / f"{clip_id}.m2ts"
                 try:
@@ -489,7 +662,7 @@ def patch_navigation_for_hevc(
         if not folder.is_dir():
             continue
         for playlist in sorted(folder.glob("*.mpls")):
-            result = patch_mpls_for_hevc(playlist, clip_ids)
+            result = patch_mpls_for_hevc(playlist, clip_ids, patch_version_headers=patch_version_headers)
             if result.get("matched_clips") or result.get("patched"):
                 report["mpls"].append(result)
     report["patched_clpi_count"] = sum(1 for item in report["clpi"] if item.get("patched") or (item.get("patch") or {}).get("patched"))
@@ -505,17 +678,31 @@ def source_clpi_for_stream(source_clip: Path) -> Path:
     return source_clip.parent.parent / "CLIPINF" / f"{source_clip.stem}.clpi"
 
 
-def restore_source_clpi(source_clip: Path, output_clpi: Path, *, output_clip: Path | None = None) -> dict[str, Any]:
+def restore_source_clpi(
+    source_clip: Path,
+    output_clpi: Path,
+    *,
+    output_clip: Path | None = None,
+    patch_version_headers: bool = False,
+    tools: dict[str, Any] | None = None,
+    prefer_actual_keyframe_spns: bool = False,
+) -> dict[str, Any]:
     source_clpi = source_clpi_for_stream(source_clip)
     if not source_clpi.exists():
         return {"source_clpi": str(source_clpi), "output_clpi": str(output_clpi), "restored": False, "missing": True}
     output_clpi.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_clpi, output_clpi)
-    patch_result = patch_clpi_for_hevc(output_clpi)
+    patch_result = patch_clpi_for_hevc(output_clpi, patch_version_headers=patch_version_headers)
     cpi_scale = None
     if output_clip:
         try:
-            cpi_scale = scale_clpi_cpi_map_to_stream(source_clip, output_clip, output_clpi)
+            cpi_scale = scale_clpi_cpi_map_to_stream(
+                source_clip,
+                output_clip,
+                output_clpi,
+                tools=tools,
+                prefer_actual_keyframe_spns=prefer_actual_keyframe_spns,
+            )
         except Exception as exc:
             cpi_scale = {"scaled": False, "error": str(exc)}
     return {
@@ -524,4 +711,5 @@ def restore_source_clpi(source_clip: Path, output_clpi: Path, *, output_clip: Pa
         "restored": True,
         "patch": patch_result,
         "cpi_scale": cpi_scale,
+        "prefer_actual_keyframe_spns": prefer_actual_keyframe_spns,
     }

@@ -15,6 +15,7 @@ import json
 import queue as thread_queue
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -72,6 +73,7 @@ from .config import (
 )
 from .diagnostics import DEFAULT_DIAGNOSTIC_LOG_LINES, cmd_diagnose
 from .encoding import encode_to_hevc_m2ts, transcode_compact_audio_tracks
+from .libbluray_record import create_libbluray_recording, isolated_bdj_storage_env
 from .muxing import (
     author_m2ts_split,
     author_uhdbd_split,
@@ -141,6 +143,7 @@ from .tools import (
     discover_tools,
     encoder_is_hardware,
     format_cmd,
+    refreshed_env,
     require_hevc_encoder,
     require_tool,
     run_cmd,
@@ -381,6 +384,10 @@ def depad_video_padding_from_args(args: argparse.Namespace) -> bool:
     if getattr(args, "keep_source_padding", False):
         return False
     return normalize_uhd_profile(getattr(args, "uhd_profile", "library")) != "disc"
+
+
+def patch_version_headers_from_args(args: argparse.Namespace) -> bool:
+    return normalize_uhd_profile(getattr(args, "uhd_profile", "library")) == "disc"
 
 
 def bitrate_options_for_args(args: argparse.Namespace) -> dict[str, Any]:
@@ -1246,7 +1253,12 @@ def mux_validate_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], 
         progress_event("mux-failed", ctx["file"])
         raise
     progress_event("mux-done", ctx["file"])
-    clpi_report = restore_source_clpi(ctx["input_path"], ctx["output_clpi"], output_clip=ctx["output_path"])
+    clpi_report = restore_source_clpi(
+        ctx["input_path"],
+        ctx["output_clpi"],
+        output_clip=ctx["output_path"],
+        patch_version_headers=patch_version_headers_from_args(args),
+    )
     if clpi_report.get("restored") and ctx["output_clpi"].exists():
         ctx["backup_clpi"].parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ctx["output_clpi"], ctx["backup_clpi"])
@@ -1635,8 +1647,14 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         enabled=progress_enabled,
     )
     if args.patch_navigation:
-        navigation_patch = patch_navigation_for_hevc(output, [clip["file"] for clip in clips], tools=tools, source_root=source)
-    uhd_structure = ensure_uhd_backup_structure(output)
+        navigation_patch = patch_navigation_for_hevc(
+            output,
+            [clip["file"] for clip in clips],
+            tools=tools,
+            source_root=source,
+            patch_version_headers=patch_version_headers_from_args(args),
+        )
+    uhd_structure = ensure_uhd_backup_structure(output, patch_version_headers=patch_version_headers_from_args(args))
     bdj_compatibility_patch = None
     selected_vlc_fixes = compatibility_fix_names_from_args(args)
     custom_patch_files = custom_compatibility_patch_files_from_args(args)
@@ -2038,7 +2056,7 @@ def cmd_patch_uhd_profile(args: argparse.Namespace) -> int:
     roots = find_disc_roots([Path(p) for p in args.paths])
     if not roots:
         raise ToolError("No BDMV backups found")
-    reports = [ensure_uhd_backup_structure(root) for root in roots]
+    reports = [ensure_uhd_backup_structure(root, patch_version_headers=patch_version_headers_from_args(args)) for root in roots]
     payload = {"patched": reports}
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
@@ -2051,7 +2069,9 @@ def cmd_patch_uhd_profile(args: argparse.Namespace) -> int:
             missing = report.get("missing_required_files") or []
             print(f"Output: {root}")
             print(f"  Created folders: {created}")
-            print(f"  Patched version headers: {version_patches}")
+            target = report.get("version_header_target")
+            action = "Patched UHD version headers" if target == "uhd" else "Restored BD-style version headers"
+            print(f"  {action}: {version_patches}")
             if missing:
                 print("  Missing required files: " + ", ".join(missing))
             cert = report.get("certificate") or {}
@@ -2084,7 +2104,15 @@ def cmd_patch_navigation(args: argparse.Namespace) -> int:
             )
             if (clip.get("video") or {}).get("codec_name") == "hevc" and (clip.get("duration") or 0) > SECONDS_REENCODE_THRESHOLD
         ]
-    report = patch_navigation_for_hevc(roots[0], clips, tools=tools, source_root=source_root, refresh_cpi=args.refresh_cpi, verbose=args.verbose)
+    report = patch_navigation_for_hevc(
+        roots[0],
+        clips,
+        tools=tools,
+        source_root=source_root,
+        refresh_cpi=args.refresh_cpi,
+        patch_version_headers=patch_version_headers_from_args(args),
+        verbose=args.verbose,
+    )
     print(json.dumps(report, indent=2))
     return 0
 
@@ -2315,6 +2343,56 @@ def cmd_patch_vlc_compat(args: argparse.Namespace) -> int:
     return 0 if report.get("patched") or report.get("patches") is not None else 4
 
 
+def vlc_bluray_uri(root: Path) -> str:
+    return "bluray:///" + root.as_posix()
+
+
+def clean_vlc_bluray_command(vlc: str, root: Path, *, region: str | None = None) -> list[str]:
+    cmd = [
+        vlc,
+        "--no-one-instance",
+        "--no-playlist-enqueue",
+        "--qt-continue=0",
+        "--no-video-title-show",
+        "--bluray-menu",
+    ]
+    if region:
+        cmd.append(f"--bluray-region={region.upper()}")
+    cmd.append(vlc_bluray_uri(root))
+    return cmd
+
+
+def cmd_play(args: argparse.Namespace) -> int:
+    tools = discover_tools()
+    vlc = require_tool(tools, "vlc")
+    target = Path(args.target).resolve()
+    roots = find_disc_roots([target])
+    if not roots:
+        raise ToolError(f"No BDMV folder found at {target}")
+    root = roots[0]
+    cmd = clean_vlc_bluray_command(vlc, root, region=args.region)
+    env = refreshed_env()
+    if getattr(args, "no_bdj_persistent_storage", False):
+        env["LIBBLURAY_PERSISTENT_STORAGE"] = "no"
+    if getattr(args, "dry_run", False):
+        payload = {
+            "target": str(root),
+            "command": format_cmd(cmd),
+            "no_bdj_persistent_storage": bool(getattr(args, "no_bdj_persistent_storage", False)),
+        }
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            print(payload["command"])
+        return 0
+    subprocess.Popen(cmd, env=env)
+    if getattr(args, "json", False):
+        print(json.dumps({"opened": str(root), "command": format_cmd(cmd)}, indent=2))
+    else:
+        print(f"Opened in VLC: {root}")
+    return 0
+
+
 def cmd_vlc_smoke(args: argparse.Namespace) -> int:
     tools = discover_tools()
     vlc = require_tool(tools, "vlc")
@@ -2326,30 +2404,51 @@ def cmd_vlc_smoke(args: argparse.Namespace) -> int:
     log_path = Path(args.log).resolve() if args.log else DEFAULT_REPORT_DIR / f"{root.name}.vlc_headless_smoke.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.unlink(missing_ok=True)
-    uri = "bluray:///" + root.as_posix()
     cmd = [
         vlc,
         "-I",
         "dummy",
         "--dummy-quiet",
+        "--no-one-instance",
+        "--no-playlist-enqueue",
         "--no-qt-privacy-ask",
-        "--play-and-exit",
-        f"--run-time={args.seconds}",
-        "--file-logging",
-        f"--logfile={log_path}",
-        "--verbose=2",
-        "--bluray-menu",
-        uri,
     ]
-    if not args.allow_resume:
-        cmd[5:5] = ["--qt-continue=0"]
-    if args.d3d11:
-        cmd[5:5] = ["--avcodec-hw=d3d11va"]
     if args.video_plane:
-        cmd[5:5] = ["--vout", "dummy", "--aout", "dummy"]
+        cmd.extend(["--vout", "dummy", "--aout", "dummy"])
     else:
-        cmd[5:5] = ["--no-video", "--aout", "dummy"]
-    proc = run_cmd(cmd, check=False, capture=True, timeout_seconds=args.seconds + 30, verbose=args.verbose)
+        cmd.extend(["--no-video", "--aout", "dummy"])
+    if args.d3d11:
+        cmd.append("--avcodec-hw=d3d11va")
+    if not args.allow_resume:
+        cmd.append("--qt-continue=0")
+    cmd.extend(
+        [
+            "--no-video-title-show",
+            "--play-and-exit",
+            f"--run-time={args.seconds}",
+            "--file-logging",
+            f"--logfile={log_path}",
+            "--verbose=2",
+            "--bluray-menu",
+        ]
+    )
+    if args.region:
+        cmd.append(f"--bluray-region={args.region.upper()}")
+    cmd.append(vlc_bluray_uri(root))
+    bdj_storage_env: dict[str, str] = {}
+    if getattr(args, "isolated_bdj_storage", False):
+        label = f"{root.parent.name or root.name}-{int(time.time())}"
+        bdj_storage_env = isolated_bdj_storage_env(DEFAULT_REPORT_DIR / "libbluray-smoke-storage", label)
+    if getattr(args, "no_bdj_persistent_storage", False):
+        bdj_storage_env["LIBBLURAY_PERSISTENT_STORAGE"] = "no"
+    proc = run_cmd(
+        cmd,
+        check=False,
+        capture=True,
+        timeout_seconds=args.seconds + 30,
+        verbose=args.verbose,
+        env_overrides=bdj_storage_env,
+    )
     text = read_text_flexible(log_path) if log_path.exists() else ""
     bad_patterns = [
         r"\bBD-J\b.*\berror\b",
@@ -2387,6 +2486,10 @@ def cmd_vlc_smoke(args: argparse.Namespace) -> int:
         "cant_read_ts_packet": len(re.findall(r"Can't read TS packet", text)),
         "adding_es": len(re.findall(r"Adding ES", text)),
         "reusing_es": len(re.findall(r"Reusing ES", text)),
+        "bdj_event_32": len(re.findall(r"event:\s*32", text)),
+        "bdj_event_25": len(re.findall(r"event:\s*25", text)),
+        "bdj_start_background": len(re.findall(r"Start background", text)),
+        "bdj_stop_background": len(re.findall(r"Stop background", text)),
         "buffer_deadlock": len(re.findall(r"buffer deadlock", text)),
         "d3d11_unsupported_bitdepth": len(re.findall(r"Unsupported bitdepth", text)),
         "d3d11_not_enough_slices": len(re.findall(r"not enough decoding slices", text)),
@@ -2399,11 +2502,27 @@ def cmd_vlc_smoke(args: argparse.Namespace) -> int:
         "d3d11_dx10_blending_failed": len(re.findall(r"blending .*DX10 failed|no matching alpha blending routine.*DX10", text)),
     }
     process_ok = proc.returncode in (0, 1) or (proc.returncode == 124 and opened and not errors)
+    video_streams_seen = counters["adding_es"] > 0 or counters["reusing_es"] > 0
+    bdj_startup_diagnosis = None
+    if args.video_plane and opened and bdj_titles and not video_streams_seen and not errors:
+        if counters["bdj_event_32"] == 0 and counters["bdj_start_background"] == 0:
+            bdj_startup_diagnosis = (
+                "libbluray opened the disc and enumerated BD-J titles, but BD-J playback events never started. "
+                "This usually points to a VLC/libbluray/JVM startup-state hang rather than invalid converted streams."
+            )
+        else:
+            bdj_startup_diagnosis = (
+                "BD-J background playback started, but VLC/libbluray never handed off to a playlist stream. "
+                "Compare source and converted logs, and try --isolated-bdj-storage to rule out stale BD-J cache state."
+            )
     result = {
         "target": str(root),
         "mode": "headless-dummy-video" if args.video_plane else "headless-no-video",
         "note": "This avoids visible windows. Dummy-video mode exercises VLC's video/subpicture path, but it still cannot prove visual menu overlay state. VLC may ignore --run-time on BD-J menus, so timeout is acceptable after a clean open.",
         "command": format_cmd(cmd),
+        "isolated_bdj_storage": bool(getattr(args, "isolated_bdj_storage", False)),
+        "bdj_storage_env": bdj_storage_env,
+        "bdj_startup_diagnosis": bdj_startup_diagnosis,
         "returncode": proc.returncode,
         "log": str(log_path),
         "counters": counters,
@@ -2415,9 +2534,10 @@ def cmd_vlc_smoke(args: argparse.Namespace) -> int:
             {"name": "no_vlc_startup_errors", "ok": not errors, "matches": errors[:10]},
             {
                 "name": "video_plane_streams_seen",
-                "ok": (not args.video_plane) or counters["adding_es"] > 0 or counters["reusing_es"] > 0,
+                "ok": (not args.video_plane) or video_streams_seen,
                 "adding_es": counters["adding_es"],
                 "reusing_es": counters["reusing_es"],
+                "diagnosis": bdj_startup_diagnosis,
             },
             {
                 "name": "no_visible_video_requested",
@@ -2429,6 +2549,38 @@ def cmd_vlc_smoke(args: argparse.Namespace) -> int:
     result["ok"] = all(check.get("ok") for check in result["checks"])
     print(json.dumps(result, indent=2))
     return 0 if result["ok"] else 4
+
+
+def cmd_record_libbluray(args: argparse.Namespace) -> int:
+    tools = discover_tools()
+    vlc = require_tool(tools, "vlc")
+    result = create_libbluray_recording(
+        target=Path(args.target),
+        source=Path(args.source) if args.source else None,
+        vlc=vlc,
+        label=args.label,
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        region=args.region,
+        duration=args.duration,
+        verbose_level=args.verbose_level,
+        isolated_bdj_storage=args.isolated_bdj_storage,
+        dry_run=args.dry_run,
+        keep_folder=args.no_zip,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+    elif result.get("dry_run"):
+        print("BD2HEVC VLC/libbluray recorder dry run.")
+        print(f"Target: {result['target']}")
+        if result.get("source"):
+            print(f"Source: {result['source']}")
+        print(f"Would save to: {result['bundle']}")
+        print(f"VLC command: {result['command']}")
+    else:
+        print("BD2HEVC VLC/libbluray recording complete.")
+        print(f"Saved to: {result['bundle']}")
+        print("Attach this bundle to a GitHub issue with the exact navigation steps.")
+    return 0 if result.get("ok") else 4
 
 
 def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -> dict[str, Any]:
@@ -2574,7 +2726,7 @@ def add_audio_args(parser: argparse.ArgumentParser) -> None:
 
 def add_uhd_output_args(parser: argparse.ArgumentParser) -> None:
     sizes = ", ".join(DISC_SIZE_BYTES)
-    parser.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="Output profile. library is the normal digital-library mode and still applies the UHD-like folder/header structure. disc adds physical-disc guardrails and requires --target-disc-size with VBR quality. auto/off are legacy aliases for library.")
+    parser.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="Output profile. library is the normal digital-library mode: UHD-like folders with BD-style navigation headers for VLC compatibility. disc adds physical-disc guardrails, patches navigation headers toward UHD, and requires --target-disc-size with VBR quality. auto/off are legacy aliases for library.")
     parser.add_argument("--target-disc-size", default=None, metavar="SIZE", help=f"Scale VBR video targets to fit a physical-disc budget. Accepts {sizes}, or a size such as 23.5GB. Requires VBR targets, not CQ.")
     parser.add_argument("--target-disc-margin", type=float, default=0.98, help="Safety margin for --target-disc-size. Default 0.98 leaves room for filesystem/authoring overhead.")
 
@@ -2612,6 +2764,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  py bd2hevc.py preset list\n"
             "  py bd2hevc.py jobs\n"
             "  py bd2hevc.py diagnose \"Converted UHD-BD\\Movie (BD) (UHD converted)\"\n"
+            "  py bd2hevc.py record-libbluray \"Converted UHD-BD\\Movie (BD) (UHD converted)\"\n"
             "\n"
             "Command help:\n"
             "  py bd2hevc.py <command> --help\n"
@@ -2867,6 +3020,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_diagnose.add_argument("--json", action="store_true", help="Print machine-readable command output.")
     p_diagnose.set_defaults(func=cmd_diagnose)
 
+    p_play = command_parser(sub, "play", help="Open a BD/UHD-BD backup in VLC with clean BD-J menu startup.", description="Launch VLC as a fresh Blu-ray menu session. This avoids VLC resume prompts, playlist enqueueing, and existing-instance reuse, which can upset some BD-J menus.", examples="""
+  py bd2hevc.py play "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py play "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --region A
+  py bd2hevc.py play "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --dry-run
+""")
+    p_play.add_argument("target", help="Converted output folder, source backup folder, or disc folder to open in VLC.")
+    p_play.add_argument("--region", choices=["A", "B", "C", "a", "b", "c"], default=None, help="Pass a Blu-ray region to VLC for this launch.")
+    p_play.add_argument("--no-bdj-persistent-storage", action="store_true", help="Disable libbluray BD-J persistent storage for this launch.")
+    p_play.add_argument("--dry-run", action="store_true", help="Print the VLC command without opening VLC.")
+    p_play.add_argument("--json", action="store_true", help="Print machine-readable command output.")
+    p_play.set_defaults(func=cmd_play)
+
+    p_record = command_parser(sub, "record-libbluray", help="Record an interactive VLC/libbluray reproduction session.", description="Open VLC visibly, let you reproduce a menu/gallery failure, then package the verbose libbluray log and safe disc metadata into a support bundle.", examples="""
+  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --source "BD backups\\Movie Disc" --label movie-gallery
+  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --region A --duration 120
+  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --isolated-bdj-storage
+""")
+    p_record.add_argument("target", help="Converted output folder, source backup folder, or disc folder to open in VLC.")
+    p_record.add_argument("--source", default=None, help="Original source backup for reference file manifests.")
+    p_record.add_argument("--label", default=None, help="Short name for the recording bundle. Defaults to the disc folder name.")
+    p_record.add_argument("--output-dir", default=None, help="Folder for recording bundles. Defaults to reports/libbluray-recordings.")
+    p_record.add_argument("--region", choices=["A", "B", "C", "a", "b", "c"], default=None, help="Pass a Blu-ray region to VLC for this recording.")
+    p_record.add_argument("--duration", type=float, default=None, help="Automatically stop after N seconds instead of waiting for Enter.")
+    p_record.add_argument("--verbose-level", type=int, default=3, choices=[0, 1, 2, 3, 4], help="VLC verbosity level. Default 3 for libbluray debugging.")
+    p_record.add_argument("--isolated-bdj-storage", action="store_true", help="Run VLC with per-recording libbluray BD-J cache and persistent storage roots.")
+    p_record.add_argument("--no-zip", action="store_true", help="Write an unpacked recording folder instead of a zip.")
+    p_record.add_argument("--dry-run", action="store_true", help="Show the VLC command and bundle path without opening VLC.")
+    p_record.add_argument("--json", action="store_true", help="Print machine-readable command output.")
+    p_record.set_defaults(func=cmd_record_libbluray)
+
     p_playlist = command_parser(sub, "playlist-probe", help="Probe a Blu-ray playlist through libbluray/FFprobe and fail on stale CLPI packet maps.", description="Probe one MPLS playlist through libbluray/FFprobe, useful when VLC progress or seeking looks wrong.", examples="""
   py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23
   py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23 --reference "BD backups\\Movie Disc"
@@ -2895,12 +3079,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_metadata.add_argument("--force", action="store_true", help="Overwrite existing bdmt_*.xml metadata.")
     p_metadata.set_defaults(func=cmd_patch_disc_metadata)
 
-    p_uhd_profile = command_parser(sub, "patch-uhd-profile", help="Patch an existing output toward UHD-BD folder conventions.", description="Create expected UHD-BD-style folders, mirror required backup files, and update copied Blu-ray navigation version headers where applicable.", examples="""
+    p_uhd_profile = command_parser(sub, "patch-uhd-profile", help="Patch an existing output toward UHD-BD folder conventions.", description="Create expected UHD-BD-style folders and mirror required backup files. Library mode restores BD-style navigation headers for VLC compatibility; disc mode patches headers toward UHD.", examples="""
   py bd2hevc.py patch-uhd-profile "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
   py bd2hevc.py patch-uhd-profile "Converted UHD-BD"
-  py bd2hevc.py patch-uhd-profile "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --json
+  py bd2hevc.py patch-uhd-profile "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --uhd-profile disc --json
 """)
     p_uhd_profile.add_argument("paths", nargs="+", help="Disc folders or a parent folder containing disc folders.")
+    p_uhd_profile.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="library restores BD-style 0200 headers; disc patches headers toward 0300 UHD-style values.")
     p_uhd_profile.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_uhd_profile.set_defaults(func=cmd_patch_uhd_profile)
 
@@ -2913,6 +3098,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_patch.add_argument("--reference", default=None, help="Original BD backup. When supplied, source CLPI files are restored, patched to HEVC, and their CPI packet maps are scaled to the output streams.")
     p_patch.add_argument("--refresh-cpi", action="store_true", default=False, help="Experimental: splice tsMuxer-generated CPI blocks into CLPI files. Normally leave this off.")
     p_patch.add_argument("--no-refresh-cpi", action="store_false", dest="refresh_cpi", help=argparse.SUPPRESS)
+    p_patch.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="library keeps BD-style navigation version headers; disc patches CLPI/MPLS version headers toward UHD.")
     p_patch.add_argument("--verbose", action="store_true")
     p_patch.set_defaults(func=cmd_patch_navigation)
 
@@ -2970,14 +3156,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_vlc = command_parser(sub, "vlc-smoke", help="Headless VLC/libbluray startup smoke test; does not open a visible video window.", description="Run a short VLC startup test against a BD/UHD-BD backup without opening a visible VLC window.", examples="""
   py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
   py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --seconds 45 --video-plane
+  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --video-plane --isolated-bdj-storage
   py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --d3d11
 """)
     p_vlc.add_argument("target", help="BD/UHD-BD backup folder.")
-    p_vlc.add_argument("--seconds", type=float, default=20.0, help="How long VLC should run before exiting.")
+    p_vlc.add_argument("--seconds", type=float, default=35.0, help="How long VLC should run before exiting. Default 35 seconds for slower BD-J startup screens.")
     p_vlc.add_argument("--log", default=None, help="VLC log path. Defaults to reports/<disc>.vlc_headless_smoke.log.")
     p_vlc.add_argument("--video-plane", action="store_true", help="Use VLC dummy video output instead of --no-video, exercising video/subpicture paths without opening a visible window.")
     p_vlc.add_argument("--d3d11", action="store_true", help="Force VLC's D3D11VA decoder path and fail on known D3D11 video-freeze warnings.")
     p_vlc.add_argument("--allow-resume", action="store_true", help="Allow VLC to resume remembered playback state instead of forcing menu startup.")
+    p_vlc.add_argument("--region", choices=["A", "B", "C", "a", "b", "c"], default=None, help="Pass a Blu-ray region to VLC for this smoke test.")
+    p_vlc.add_argument("--isolated-bdj-storage", action="store_true", help="Run VLC with a fresh libbluray BD-J cache/persistent-storage root for this smoke test.")
+    p_vlc.add_argument("--no-bdj-persistent-storage", action="store_true", help="Disable libbluray BD-J persistent storage for this smoke test.")
     p_vlc.add_argument("--verbose", action="store_true")
     p_vlc.set_defaults(func=cmd_vlc_smoke)
 

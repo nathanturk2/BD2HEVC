@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from bd2hevc_app import core as bd
-from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, muxing, navigation, output, presets, progress, queueing, repair, scan, tools, uhd, validation
+from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, libbluray_record, muxing, navigation, output, presets, progress, queueing, repair, scan, tools, uhd, validation
 
 
 class ModuleSplitTests(unittest.TestCase):
@@ -80,6 +80,8 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIs(uhd.ensure_uhd_backup_structure, bd.ensure_uhd_backup_structure)
         self.assertIs(progress.fit_terminal_line, bd.fit_terminal_line)
         self.assertIs(diagnostics.cmd_diagnose, bd.cmd_diagnose)
+        self.assertIs(libbluray_record.create_libbluray_recording, bd.create_libbluray_recording)
+        self.assertIs(libbluray_record.isolated_bdj_storage_env, bd.isolated_bdj_storage_env)
 
     def test_diagnose_help_is_available(self) -> None:
         parser = bd.build_parser()
@@ -92,6 +94,52 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("Create a shareable diagnostic zip", diagnose_help)
         self.assertIn('py bd2hevc.py diagnose "Converted UHD-BD', diagnose_help)
         self.assertIn("Default 5000", diagnose_help)
+
+    def test_record_libbluray_help_and_command_builder(self) -> None:
+        parser = bd.build_parser()
+        with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["record-libbluray", "--help"])
+            record_help = buffer.getvalue()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("Open VLC visibly", record_help)
+        self.assertIn("--region", record_help)
+        self.assertIn("--duration", record_help)
+        self.assertIn("--isolated-bdj-storage", record_help)
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp) / "Movie" / "BDMV"
+            root.mkdir(parents=True)
+            log = Path(temp) / "vlc.log"
+            cmd = libbluray_record.build_vlc_libbluray_record_command(
+                vlc="vlc",
+                root=root,
+                log_path=log,
+                region="a",
+                verbose_level=3,
+            )
+
+        self.assertIn("--bluray-menu", cmd)
+        self.assertIn("--file-logging", cmd)
+        self.assertIn("--no-video-title-show", cmd)
+        self.assertIn("--bluray-region=A", cmd)
+        self.assertTrue(any(item.startswith("--logfile=") for item in cmd))
+        self.assertTrue(cmd[-1].startswith("bluray:///"))
+
+    def test_isolated_bdj_storage_env(self) -> None:
+        with TemporaryDirectory() as temp:
+            base = Path(temp) / "storage"
+            env = libbluray_record.isolated_bdj_storage_env(base, "Movie: Disc")
+
+            self.assertIn("LIBBLURAY_CACHE_ROOT", env)
+            self.assertIn("LIBBLURAY_PERSISTENT_ROOT", env)
+            self.assertTrue(Path(env["LIBBLURAY_CACHE_ROOT"]).exists())
+            self.assertTrue(Path(env["LIBBLURAY_PERSISTENT_ROOT"]).exists())
+            self.assertIn("Movie_Disc", env["LIBBLURAY_CACHE_ROOT"])
+
+            dry = libbluray_record.isolated_bdj_storage_env(base / "dry", "Dry Disc", create=False)
+            self.assertFalse(Path(dry["LIBBLURAY_CACHE_ROOT"]).exists())
 
     def test_clip_list_shows_source_and_planned_output_codec(self) -> None:
         clips = [
@@ -490,7 +538,34 @@ class BitratePresetTests(unittest.TestCase):
 
 
 class CopyPlanningTests(unittest.TestCase):
-    def test_uhd_structure_patches_versions_and_mirrors_required_backups(self) -> None:
+    def test_uhd_structure_library_restores_bd_versions_and_mirrors_required_backups(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "BDMV" / "BDJO").mkdir(parents=True)
+            (root / "BDMV" / "CLIPINF").mkdir(parents=True)
+            (root / "BDMV" / "PLAYLIST").mkdir(parents=True)
+            (root / "BDMV" / "index.bdmv").write_bytes(b"INDX0300payload")
+            (root / "BDMV" / "MovieObject.bdmv").write_bytes(b"MOBJ0200payload")
+            (root / "BDMV" / "BDJO" / "00000.bdjo").write_bytes(b"BDJO0300payload")
+            (root / "BDMV" / "CLIPINF" / "00001.clpi").write_bytes(b"HDMV0300payload")
+            (root / "BDMV" / "PLAYLIST" / "00001.mpls").write_bytes(b"MPLS0200payload")
+
+            report = bd.ensure_uhd_backup_structure(root)
+
+            self.assertEqual(report["version_header_target"], "bd")
+            self.assertEqual((root / "BDMV" / "index.bdmv").read_bytes()[:8], b"INDX0200")
+            self.assertEqual((root / "BDMV" / "MovieObject.bdmv").read_bytes()[:8], b"MOBJ0200")
+            self.assertEqual((root / "BDMV" / "BDJO" / "00000.bdjo").read_bytes()[:8], b"BDJO0200")
+            self.assertEqual((root / "BDMV" / "CLIPINF" / "00001.clpi").read_bytes()[:8], b"HDMV0200")
+            self.assertEqual((root / "BDMV" / "PLAYLIST" / "00001.mpls").read_bytes()[:8], b"MPLS0200")
+            self.assertTrue((root / "BDMV" / "BACKUP" / "index.bdmv").exists())
+            self.assertTrue((root / "BDMV" / "BACKUP" / "MovieObject.bdmv").exists())
+            self.assertTrue((root / "BDMV" / "BACKUP" / "CLIPINF" / "00001.clpi").exists())
+            self.assertTrue((root / "BDMV" / "BACKUP" / "PLAYLIST" / "00001.mpls").exists())
+            self.assertTrue((root / "CERTIFICATE" / "BACKUP").is_dir())
+            self.assertFalse(report["certificate"]["id_bdmv_exists"])
+
+    def test_uhd_structure_disc_profile_patches_versions(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "BDMV" / "BDJO").mkdir(parents=True)
@@ -502,19 +577,82 @@ class CopyPlanningTests(unittest.TestCase):
             (root / "BDMV" / "CLIPINF" / "00001.clpi").write_bytes(b"HDMV0200payload")
             (root / "BDMV" / "PLAYLIST" / "00001.mpls").write_bytes(b"MPLS0200payload")
 
-            report = bd.ensure_uhd_backup_structure(root)
+            report = bd.ensure_uhd_backup_structure(root, patch_version_headers=True)
 
+            self.assertEqual(report["version_header_target"], "uhd")
             self.assertEqual((root / "BDMV" / "index.bdmv").read_bytes()[:8], b"INDX0300")
             self.assertEqual((root / "BDMV" / "MovieObject.bdmv").read_bytes()[:8], b"MOBJ0300")
             self.assertEqual((root / "BDMV" / "BDJO" / "00000.bdjo").read_bytes()[:8], b"BDJO0300")
             self.assertEqual((root / "BDMV" / "CLIPINF" / "00001.clpi").read_bytes()[:8], b"HDMV0300")
             self.assertEqual((root / "BDMV" / "PLAYLIST" / "00001.mpls").read_bytes()[:8], b"MPLS0300")
-            self.assertTrue((root / "BDMV" / "BACKUP" / "index.bdmv").exists())
-            self.assertTrue((root / "BDMV" / "BACKUP" / "MovieObject.bdmv").exists())
-            self.assertTrue((root / "BDMV" / "BACKUP" / "CLIPINF" / "00001.clpi").exists())
-            self.assertTrue((root / "BDMV" / "BACKUP" / "PLAYLIST" / "00001.mpls").exists())
-            self.assertTrue((root / "CERTIFICATE" / "BACKUP").is_dir())
-            self.assertFalse(report["certificate"]["id_bdmv_exists"])
+
+    def test_navigation_patch_keeps_bd_version_headers_by_default(self) -> None:
+        with TemporaryDirectory() as temp:
+            clip_ids = {"00001"}
+            clpi = Path(temp) / "00001.clpi"
+            mpls = Path(temp) / "00001.mpls"
+            clpi.write_bytes(b"HDMV0200" + config.CLPI_PRIMARY_VIDEO_AVC + b"payload")
+            item_body = b"00001" + b"\x00" * 8 + config.MPLS_PRIMARY_VIDEO_AVC + b"payload"
+            playlist = (200).to_bytes(4, "big") + b"\x00\x00" + (1).to_bytes(2, "big") + b"\x00\x00" + len(item_body).to_bytes(2, "big") + item_body
+            mpls.write_bytes(b"MPLS0200" + (20).to_bytes(4, "big") + b"\x00" * 8 + playlist)
+
+            clpi_report = navigation.patch_clpi_for_hevc(clpi)
+            mpls_report = navigation.patch_mpls_for_hevc(mpls, clip_ids)
+
+            self.assertTrue(clpi_report["patched"])
+            self.assertFalse(clpi_report["version_changed"])
+            self.assertEqual(clpi.read_bytes()[:8], b"HDMV0200")
+            self.assertFalse(mpls_report["version_changed"])
+            self.assertEqual(mpls.read_bytes()[:8], b"MPLS0200")
+
+    def test_navigation_patch_disc_profile_patches_version_headers(self) -> None:
+        with TemporaryDirectory() as temp:
+            clip_ids = {"00001"}
+            clpi = Path(temp) / "00001.clpi"
+            mpls = Path(temp) / "00001.mpls"
+            clpi.write_bytes(b"HDMV0200" + config.CLPI_PRIMARY_VIDEO_AVC + b"payload")
+            item_body = b"00001" + b"\x00" * 8 + config.MPLS_PRIMARY_VIDEO_AVC + b"payload"
+            playlist = (200).to_bytes(4, "big") + b"\x00\x00" + (1).to_bytes(2, "big") + b"\x00\x00" + len(item_body).to_bytes(2, "big") + item_body
+            mpls.write_bytes(b"MPLS0200" + (20).to_bytes(4, "big") + b"\x00" * 8 + playlist)
+
+            clpi_report = navigation.patch_clpi_for_hevc(clpi, patch_version_headers=True)
+            mpls_report = navigation.patch_mpls_for_hevc(mpls, clip_ids, patch_version_headers=True)
+
+            self.assertTrue(clpi_report["version_changed"])
+            self.assertEqual(clpi.read_bytes()[:8], b"HDMV0300")
+            self.assertTrue(mpls_report["version_changed"])
+            self.assertEqual(mpls.read_bytes()[:8], b"MPLS0300")
+
+    def test_short_repeated_playitem_clips_detects_menu_style_playlist(self) -> None:
+        def item(clip_id: str, start: int, end: int) -> bytes:
+            body = clip_id.encode("ascii") + b"M2TS" + b"\x00" * 3 + start.to_bytes(4, "big") + end.to_bytes(4, "big") + b"\x00" * 24
+            return len(body).to_bytes(2, "big") + body
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            playlist_dir = root / "BDMV" / "PLAYLIST"
+            playlist_dir.mkdir(parents=True)
+            playitems = b"".join(item("00107", 45_000 * index, 45_000 * (index + 1)) for index in range(3))
+            payload = (6 + len(playitems)).to_bytes(4, "big") + b"\x00\x00" + (3).to_bytes(2, "big") + b"\x00\x00" + playitems
+            (playlist_dir / "01072.mpls").write_bytes(b"MPLS0200" + (20).to_bytes(4, "big") + b"\x00" * 8 + payload)
+            single = item("00001", 0, 45_000)
+            single_payload = (6 + len(single)).to_bytes(4, "big") + b"\x00\x00" + (1).to_bytes(2, "big") + b"\x00\x00" + single
+            (playlist_dir / "00001.mpls").write_bytes(b"MPLS0200" + (20).to_bytes(4, "big") + b"\x00" * 8 + single_payload)
+
+            candidates = navigation.short_repeated_playitem_clips(root, {"00107", "00001"})
+
+            self.assertIn("00107", candidates)
+            self.assertEqual(candidates["00107"][0]["playitem_count"], 3)
+            self.assertNotIn("00001", candidates)
+
+    def test_actual_keyframe_spn_entries_requires_close_keyframe_count(self) -> None:
+        actual = [(0, 4095, 4), (1, 4271, 2423), (2, 4447, 4875)]
+        keyframes = [{"spn": 4}, {"spn": 1159}, {"spn": 2551}, {"spn": 3000}]
+
+        mapped = navigation.actual_keyframe_spn_entries(actual, keyframes)
+
+        self.assertEqual(mapped, [(0, 4095, 4), (1, 4271, 1159), (2, 4447, 2551)])
+        self.assertIsNone(navigation.actual_keyframe_spn_entries(actual, keyframes + [{"spn": 4000}]))
 
     def test_disc_size_fit_scales_vbr_targets(self) -> None:
         with TemporaryDirectory() as temp:

@@ -187,7 +187,9 @@ def print_conversion_summary(
         if uhd_structure:
             created = len(uhd_structure.get("created_dirs") or [])
             version_patches = sum(1 for item in uhd_structure.get("version_patches") or [] if item.get("patched"))
-            print(f"UHD profile: applied ({created} folders created, {version_patches} version headers patched)")
+            header_target = uhd_structure.get("version_header_target")
+            header_action = "UHD headers patched" if header_target == "uhd" else "BD-style headers restored"
+            print(f"UHD profile: applied ({created} folders created, {version_patches} {header_action})")
         makemkv = result.get("makemkv_validation") or {}
         if makemkv.get("skipped"):
             print("MakeMKV validation: skipped")

@@ -38,6 +38,7 @@ guaranteed.
 - [VLC Compatibility Fixes](#vlc-compatibility-fixes)
 - [Normal Validation](#normal-validation)
 - [Automated Support Reports](#automated-support-reports)
+- [Interactive libbluray Recorder](#interactive-libbluray-recorder)
 - [Requirements](#requirements)
 - [Installing Tools](#installing-tools)
 - [VLC Java Setup For Menus](#vlc-java-setup-for-menus)
@@ -288,12 +289,14 @@ spellings `--bitrate-mode compact-cq --compact-cq-value 20`, `--main-title-cq
 
 ## UHD And Disc Size Targets
 
-Full-disc outputs always get the UHD-like folder/header normalization pass while
+Full-disc outputs always get the UHD-like folder normalization pass while
 remaining unencrypted folder backups. BD2HEVC creates the expected BDMV and
-CERTIFICATE folders when missing, mirrors required `BACKUP` files, and updates
-copied navigation version headers from Blu-ray `0200` style headers to `0300`
-where that is safe to do. This is part of the normal digital-library workflow,
-not a claim that the result is a licensed/encrypted UHD-BD.
+CERTIFICATE folders when missing and mirrors required `BACKUP` files. In normal
+library mode it keeps or restores Blu-ray `0200` style navigation headers
+because that has been friendlier to VLC/libbluray on fragile BD-J discs. The
+physical-disc profile can still patch copied navigation headers toward UHD-style
+`0300` values. None of this is a claim that the result is a licensed/encrypted
+UHD-BD.
 
 `--uhd-profile` is reserved for intent and guardrails:
 
@@ -303,7 +306,8 @@ not a claim that the result is a licensed/encrypted UHD-BD.
 - `--uhd-profile disc` is for physical-disc experiments. It requires
   `--target-disc-size` and rejects CQ/compact-CQ settings because CQ cannot know
   the final size before encoding. Disc mode keeps padded source bitrate
-  estimates for conservative sizing; it does not add fake codec filler back into
+  estimates for conservative sizing and patches navigation version headers
+  toward UHD-style `0300` values; it does not add fake codec filler back into
   the HEVC stream.
 
 Patch an existing converted output without reencoding it:
@@ -595,6 +599,43 @@ id shown by `python bd2hevc.py jobs`:
 python bd2hevc.py diagnose "Converted UHD-BD/My Disc (BD) (UHD converted)" --job 20260429-153012-MY_DISC
 ```
 
+## Interactive libbluray Recorder
+
+For failures that only happen after a specific VLC menu sequence, use the
+interactive recorder. It opens VLC visibly with verbose libbluray logging, lets
+you reproduce the failure, then packages the log and safe file manifests:
+
+```bash
+python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --source "MY_DISC_BACKUP" --label my-disc-gallery
+```
+
+Workflow:
+
+1. Run the command.
+2. VLC opens with disc menus enabled.
+3. Reproduce the failure in VLC.
+4. Return to the terminal and press Enter.
+5. Attach the zip saved under `reports/libbluray-recordings/` to the issue and
+   include the exact button sequence.
+
+Useful options:
+
+```bash
+python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --region A
+python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --duration 120
+python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --isolated-bdj-storage
+python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --dry-run
+```
+
+Use `--isolated-bdj-storage` when a BD-J problem is intermittent or when you
+are comparing an original backup against a converted output. It gives VLC a
+fresh libbluray cache and persistent-storage root for that recording so stale
+BD-J state is less likely to hide the failure or create a false one.
+
+The recorder does not include `.m2ts` media, BD-J JAR contents, keys, decryption
+logs, or raw disc assets. It is meant to capture VLC/libbluray state and log
+context, not redistribute disc data.
+
 ## Requirements
 
 Supported operating systems:
@@ -676,7 +717,17 @@ java -version
 where java
 ```
 
-Open a backup in VLC:
+Open a backup in VLC through BD2HEVC's clean launcher:
+
+```cmd
+python bd2hevc.py play "Converted UHD-BD\My Disc (BD) (UHD converted)" --region A
+```
+
+`play` starts a fresh VLC Blu-ray-menu session, disables VLC's resume prompt,
+and avoids reusing an existing VLC playlist/input. That is more reliable for
+some slow or stateful BD-J menus than opening the same folder manually.
+
+Manual VLC opening is still possible:
 
 1. Choose `Media` > `Open Disc`.
 2. Select `Blu-ray`.
@@ -700,7 +751,7 @@ sudo apt install vlc openjdk-8-jre libbluray-bdj libbluray-bin
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
 export PATH="$JAVA_HOME/bin:$PATH"
-vlc "bluray:///path/to/backup"
+python bd2hevc.py play "/path/to/backup" --region A
 ```
 
 Troubleshooting:
@@ -708,6 +759,9 @@ Troubleshooting:
 - Match VLC and Java architecture on Windows: 64-bit VLC needs 64-bit Java.
 - Open `Tools` > `Messages`, set verbosity to `2`, and look for `libbluray`
   messages if menus do not load.
+- If a menu hangs only when opened manually, try `python bd2hevc.py play ...`.
+  It launches VLC with `--bluray-menu`, `--qt-continue=0`,
+  `--no-one-instance`, and `--no-playlist-enqueue`.
 - Some VLC builds are packaged without BD-J support. Try the official VLC build
   on Windows or install your distro's `libbluray-bdj` package on Linux.
 - WSL is useful for conversion, but native Windows or native Linux VLC is usually
@@ -736,10 +790,12 @@ bd2hevc tools
 - Patches CLPI/MPLS video descriptors so replacement clips are described as
   HEVC.
 - Adjusts CLPI packet maps so VLC/libbluray does not follow stale packet
-  positions from the larger source streams.
-- Applies the always-on UHD-like structure pass: required folder placeholders,
-  backup mirrors, and copied navigation version headers are brought closer to
-  UHD-BD folder conventions.
+  positions from the larger source streams. Short repeated-playitem menu and
+  gallery clips use actual output keyframe packet positions instead of a simple
+  source/output size ratio.
+- Applies the always-on UHD-like structure pass: required folder placeholders
+  and backup mirrors are created. Library mode keeps BD-style navigation version
+  headers for VLC compatibility; disc mode can patch those headers toward UHD.
 - Generates missing disc-library metadata so VLC shows a normal title instead
   of a long `bluray:///...` path.
 - Applies known narrow BD-J compatibility fixes where BD2HEVC has an automated,
@@ -973,10 +1029,17 @@ Preview the repair plan:
 python bd2hevc.py repair-output "MY_DISC_BACKUP" "Converted UHD-BD/My Disc (BD) (UHD converted)" --dry-run
 ```
 
-Apply only the UHD profile folder/header pass to older outputs:
+Apply only the UHD profile folder pass to older outputs, restoring BD-style
+headers for VLC/library playback:
 
 ```bash
 python bd2hevc.py patch-uhd-profile "Converted UHD-BD/My Disc (BD) (UHD converted)"
+```
+
+Patch headers toward UHD-style values for a physical-disc experiment:
+
+```bash
+python bd2hevc.py patch-uhd-profile "Converted UHD-BD/My Disc (BD) (UHD converted)" --uhd-profile disc
 ```
 
 Run a headless VLC/libbluray smoke test without opening a visible video window:
@@ -985,10 +1048,23 @@ Run a headless VLC/libbluray smoke test without opening a visible video window:
 python bd2hevc.py vlc-smoke "Converted UHD-BD/My Disc (BD) (UHD converted)"
 ```
 
+Open a backup in VLC with a clean BD-J menu launch:
+
+```bash
+python bd2hevc.py play "Converted UHD-BD/My Disc (BD) (UHD converted)" --region A
+```
+
 Test the Windows D3D11 path:
 
 ```bash
 python bd2hevc.py vlc-smoke "Converted UHD-BD/My Disc (BD) (UHD converted)" --video-plane --d3d11
+```
+
+Isolate libbluray's BD-J cache and persistent storage for an intermittent menu
+startup check:
+
+```bash
+python bd2hevc.py vlc-smoke "Converted UHD-BD/My Disc (BD) (UHD converted)" --video-plane --isolated-bdj-storage
 ```
 
 Probe a specific playlist through libbluray/FFprobe:
@@ -1007,6 +1083,12 @@ Create a redacted bundle for a GitHub support issue:
 
 ```bash
 python bd2hevc.py diagnose "Converted UHD-BD/My Disc (BD) (UHD converted)" --source "MY_DISC_BACKUP"
+```
+
+Record an interactive VLC/libbluray reproduction session:
+
+```bash
+python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --source "MY_DISC_BACKUP" --label my-disc-gallery
 ```
 
 Audit source backups for transport null packets and safe coded-video padding:

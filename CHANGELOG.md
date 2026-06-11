@@ -41,6 +41,9 @@
 - Added POSIX-safe background queue detachment and cancellation behavior.
 - Added VLC smoke-test helper that avoids saved resume/bookmark state by
   default.
+- Added a `play` command for opening backups in VLC as fresh Blu-ray-menu
+  sessions, avoiding VLC resume prompts and existing-instance playlist reuse
+  that can upset some BD-J startup screens.
 - Added validation checks for long-clip HEVC output, audio passthrough,
   source-aligned timestamps, sparse clip timing preservation, and no-B-frame
   sparse HEVC output.
@@ -102,9 +105,14 @@
   `--preset NAME`, so common quality/audio profiles can be created, reused, and
   removed without manually editing or remembering JSON file paths.
 - Added an always-on UHD-like structure pass that creates expected
-  BDMV/CERTIFICATE folder placeholders, mirrors required backup navigation
-  files, and patches copied navigation version headers toward UHD-BD
-  conventions. Existing outputs can be updated with `patch-uhd-profile`.
+  BDMV/CERTIFICATE folder placeholders and mirrors required backup navigation
+  files. Library mode keeps/restores BD-style navigation version headers for
+  VLC/libbluray compatibility, while `--uhd-profile disc` patches headers
+  toward UHD-BD conventions. Existing outputs can be updated with
+  `patch-uhd-profile`.
+- Added isolated libbluray BD-J cache/persistent-storage options to
+  `vlc-smoke` and `record-libbluray`, plus clearer smoke-test diagnostics for
+  discs that open BD-J but never hand off to playlist streams.
 - Changed `--uhd-profile` into an intent/guardrail selector: `library` is the
   normal digital-library default, while `disc` requires a target disc size and
   predictable VBR quality.
@@ -124,3 +132,13 @@
   backed by CC0 acronym data plus media-specific terms.
 - Improved sparse silent menu/gallery clip detection so still-like video-only
   clips preserve their real source timing after conversion.
+- Improved CLPI CPI repair for short repeated-playitem menu/gallery clips by
+  mapping restored source entries to the actual HEVC keyframe packet positions,
+  avoiding ratio-scaled packet maps that can truncate gallery wrapper
+  playlists.
+- Added `record-libbluray`, an interactive VLC/libbluray debug recorder that
+  captures a menu/gallery reproduction log plus safe manifests for support
+  reports without bundling media or raw disc assets.
+- Restricted navigation version-header patching to `--uhd-profile disc`; normal
+  library conversions now keep or restore source-era BD headers to avoid VLC
+  BD-J startup stalls on fragile discs.
