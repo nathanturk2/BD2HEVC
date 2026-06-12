@@ -6,6 +6,7 @@ import subprocess
 import json
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -82,6 +83,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIs(diagnostics.cmd_diagnose, bd.cmd_diagnose)
         self.assertIs(libbluray_record.create_libbluray_recording, bd.create_libbluray_recording)
         self.assertIs(libbluray_record.isolated_bdj_storage_env, bd.isolated_bdj_storage_env)
+        self.assertIs(libbluray_record.libbluray_debug_env, bd.libbluray_debug_env)
 
     def test_diagnose_help_is_available(self) -> None:
         parser = bd.build_parser()
@@ -107,6 +109,7 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn("--region", record_help)
         self.assertIn("--duration", record_help)
         self.assertIn("--isolated-bdj-storage", record_help)
+        self.assertIn("--libbluray-debug-mask", record_help)
 
         with TemporaryDirectory() as temp:
             root = Path(temp) / "Movie" / "BDMV"
@@ -127,6 +130,11 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertTrue(any(item.startswith("--logfile=") for item in cmd))
         self.assertTrue(cmd[-1].startswith("bluray:///"))
 
+        parsed = parser.parse_args(["record-libbluray", "Disc", "--libbluray-debug-mask"])
+        self.assertEqual(parsed.libbluray_debug_mask, "0x3e940")
+        parsed = parser.parse_args(["record-libbluray", "Disc", "--libbluray-debug-mask", "0x2140"])
+        self.assertEqual(parsed.libbluray_debug_mask, "0x2140")
+
     def test_isolated_bdj_storage_env(self) -> None:
         with TemporaryDirectory() as temp:
             base = Path(temp) / "storage"
@@ -140,6 +148,14 @@ class ModuleSplitTests(unittest.TestCase):
 
             dry = libbluray_record.isolated_bdj_storage_env(base / "dry", "Dry Disc", create=False)
             self.assertFalse(Path(dry["LIBBLURAY_CACHE_ROOT"]).exists())
+
+    def test_libbluray_debug_env(self) -> None:
+        with TemporaryDirectory() as temp:
+            log = Path(temp) / "bd.log"
+            env = libbluray_record.libbluray_debug_env(log, "0x3e940")
+
+        self.assertEqual(env["BD_DEBUG_FILE"], str(log.resolve()))
+        self.assertEqual(env["BD_DEBUG_MASK"], "0x3e940")
 
     def test_clip_list_shows_source_and_planned_output_codec(self) -> None:
         clips = [
@@ -285,6 +301,137 @@ class ModuleSplitTests(unittest.TestCase):
 
         self.assertEqual(state["encode_speed"], "3.0x")
         self.assertEqual(state["audio_speed"], "50.0x")
+
+
+class BDJCompatibilityPatchTests(unittest.TestCase):
+    def _disc_root(self, temp: str) -> Path:
+        root = Path(temp) / "Disc"
+        (root / "BDMV").mkdir(parents=True)
+        return root
+
+    def test_known_bdj_auto_patch_selects_applicable_vlc_fixes(self) -> None:
+        cases = [
+            (True, False, ["music-jukebox-queued-state"]),
+            (False, True, ["topmenu-mark-zero-on-return"]),
+            (True, True, ["music-jukebox-queued-state", "topmenu-mark-zero-on-return"]),
+        ]
+
+        for music_match, topmenu_match, expected_fixes in cases:
+            with self.subTest(expected_fixes=expected_fixes), TemporaryDirectory() as temp:
+                root = self._disc_root(temp)
+                patch_report = {"patch": "vlc-menu", "patched": True, "jars": []}
+                with (
+                    mock.patch.object(bdj, "should_apply_music_jukebox_vlc_patch", return_value=music_match),
+                    mock.patch.object(bdj, "should_apply_hscene_menu_vlc_patch", return_value=topmenu_match),
+                    mock.patch.object(bdj, "patch_bluray_vlc_menu", return_value=patch_report) as patcher,
+                ):
+                    report = bdj.patch_known_bdj_compatibility(root)
+
+                patcher.assert_called_once_with(root, fixes=expected_fixes, backup=True)
+                self.assertEqual(report["patches"], [patch_report])
+                self.assertTrue(report["patched"])
+
+    def test_known_bdj_auto_patch_skips_when_no_vlc_fix_matches(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = self._disc_root(temp)
+            with (
+                mock.patch.object(bdj, "should_apply_music_jukebox_vlc_patch", return_value=False),
+                mock.patch.object(bdj, "should_apply_hscene_menu_vlc_patch", return_value=False),
+                mock.patch.object(bdj, "patch_bluray_vlc_menu") as patcher,
+            ):
+                report = bdj.patch_known_bdj_compatibility(root)
+
+        patcher.assert_not_called()
+        self.assertEqual(report["patches"], [])
+        self.assertFalse(report["patched"])
+
+    def test_music_jukebox_signature_requires_helper_and_state_patch_points(self) -> None:
+        with TemporaryDirectory() as temp:
+            jar = Path(temp) / "00000.jar"
+            with zipfile.ZipFile(jar, "w") as zf:
+                zf.writestr("com/wb/bdj/menu/MusicJukeboxButtonHelper.class", b"helper")
+                zf.writestr("com/wb/bdj/controller/MusicJukeboxState.class", b"state")
+            with (
+                mock.patch.object(bdj, "patch_music_jukebox_button_queues_state", return_value=(b"helper", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_state_restores_default_focus", return_value=(b"state", {"matches": 1})),
+            ):
+                self.assertTrue(bdj.jar_has_music_jukebox_queued_state_signature(jar))
+
+            with mock.patch.object(
+                bdj,
+                "patch_music_jukebox_button_queues_state",
+                return_value=(b"helper", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_state_restores_default_focus",
+                return_value=(b"state", {"matches": 0, "error": "missing state hook"}),
+            ):
+                self.assertFalse(bdj.jar_has_music_jukebox_queued_state_signature(jar))
+
+            missing_state = Path(temp) / "missing-state.jar"
+            with zipfile.ZipFile(missing_state, "w") as zf:
+                zf.writestr("com/wb/bdj/menu/MusicJukeboxButtonHelper.class", b"helper")
+            self.assertFalse(bdj.jar_has_music_jukebox_queued_state_signature(missing_state))
+
+    def test_music_jukebox_menu_layer_patch_appends_authored_group_only(self) -> None:
+        with TemporaryDirectory() as temp:
+            prop = Path(temp) / "menu_base.prop"
+            prop.write_text(
+                "\n".join(
+                    [
+                        "the_music_revisited.class=com.wb.bdj.menu.MusicJukeboxButtonHelper,,music_jukebox,,,rock_is_dead",
+                        "the_music_revisited.jukeboxMenuId=music_jukebox_popup",
+                        "the_music_revisited.playlistMenuId=jukebox_group",
+                        "music_jukebox_popup.name=MusicJukeboxPopup",
+                        "music_jukebox_popup.type=Menu",
+                        "music_jukebox_popup.children=jukebox_header_text,jukebox_exit",
+                        "jukebox_group.name=MusicJukeboxGroup",
+                        "jukebox_group.type=RadioGroup",
+                        "jukebox_group.children=jukebox_song01,jukebox_song02",
+                    ]
+                )
+                + "\n",
+                encoding="ISO-8859-1",
+            )
+
+            report = bdj.patch_music_jukebox_menu_layer_properties(prop)
+            second = bdj.patch_music_jukebox_menu_layer_properties(prop)
+            text = prop.read_text(encoding="ISO-8859-1")
+            backup_exists = Path(str(prop) + ".bak_before_codex_bdj_patch").exists()
+
+        self.assertTrue(report["patched"])
+        self.assertTrue(backup_exists)
+        self.assertIn("music_jukebox_popup.children=jukebox_header_text,jukebox_exit,jukebox_group", text)
+        self.assertNotIn("jukebox_clear_back", text)
+        self.assertNotIn("zIndex", text)
+        self.assertFalse(second["patched"])
+        self.assertTrue(second["already_patched"])
+
+    def test_music_jukebox_menu_layer_patch_skips_unmatched_menu(self) -> None:
+        with TemporaryDirectory() as temp:
+            prop = Path(temp) / "menu_base.prop"
+            prop.write_text(
+                "\n".join(
+                    [
+                        "regular_button.class=com.wb.bdj.menu.SpecialFeatureClipButtonHelper,,music_jukebox,,,rock_is_dead",
+                        "regular_button.jukeboxMenuId=music_jukebox_popup",
+                        "regular_button.playlistMenuId=jukebox_group",
+                        "music_jukebox_popup.type=Menu",
+                        "music_jukebox_popup.children=jukebox_header_text,jukebox_exit",
+                        "jukebox_group.type=RadioGroup",
+                        "jukebox_group.children=jukebox_song01",
+                    ]
+                )
+                + "\n",
+                encoding="ISO-8859-1",
+            )
+
+            report = bdj.patch_music_jukebox_menu_layer_properties(prop)
+            lines = prop.read_text(encoding="ISO-8859-1").splitlines()
+
+        self.assertFalse(report["patched"])
+        self.assertTrue(report["skipped"])
+        self.assertNotIn("jukebox_group", lines[4])
 
 
 class BitratePresetTests(unittest.TestCase):

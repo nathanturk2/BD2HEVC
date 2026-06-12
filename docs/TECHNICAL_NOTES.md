@@ -83,12 +83,28 @@ Example custom patch file:
 }
 ```
 
-The current built-in VLC fix is `topmenu-mark-zero-on-return`. It was developed
-against a disc with a VLC-only top-menu redraw failure, but auto detection
-applies it to other discs only when the same BlueMoon-style playlist wrapper
-signature is present.
+The current built-in VLC fixes are `music-jukebox-queued-state` and
+`topmenu-mark-zero-on-return`. Auto detection applies each fix only when the
+matching BD-J bytecode signature is present.
 
-The fix normalizes top-menu playlist returns from a positive playmark to the
+`music-jukebox-queued-state` handles a Warner-style music jukebox helper where
+the button starts the music-jukebox state before queuing the matching jukebox
+menu buttons. The compatibility patch keeps the same helper method and state
+name, but first queues the disc's own previous-menu close/show calls, queues
+the authored jukebox popup and track group together, and only then queues the
+state change so VLC/libbluray has the track-picker menu in place before playlist
+selection. When extracted Warner menu resource folders are present, the patch
+also appends the existing playlist radio group to the existing jukebox popup's
+children list; it does not generate art, add z-index overrides, or create a new
+background layer. The state handler is also guarded so if VLC/libbluray reaches
+the music-jukebox state with no current button, the disc's authored default
+track button is restored before the original playback-helper logic runs.
+
+`topmenu-mark-zero-on-return` was developed against a disc with a VLC-only
+top-menu redraw failure, but auto detection applies it to other discs only when
+the same BlueMoon-style playlist wrapper signature is present.
+
+The top-menu fix normalizes playlist returns from a positive playmark to the
 menu entry point. This avoids a VLC/libbluray path where the top-menu title
 starts but no mark events or BD-J graphics updates are emitted, leaving only the
 menu backdrop visible.

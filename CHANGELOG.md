@@ -55,9 +55,15 @@
 - Added `playlist-probe` to validate specific Blu-ray playlists through
   libbluray/FFprobe, including duration, video frame count, decode samples, and
   stale-CLPI `Read past EOF` detection.
+- Added optional direct libbluray debug capture to `record-libbluray` via
+  `--libbluray-debug-mask`.
 - Added modular VLC/libbluray compatibility fixes with `--vlc-compat`,
   repeatable `--vlc-fix`, JSON `--compat-patch-file` support, and
   `patch-vlc-compat` for existing outputs.
+- Added the `music-jukebox-queued-state` VLC compatibility fix for matching
+  Warner-style BD-J music jukebox menus, including faithful previous-menu
+  cleanup, authored track-group layering for matching extracted menu resources,
+  and null-focus recovery before the disc's original playback helper runs.
 - Generalized the validated BD-J top-menu compatibility fix so auto mode
   applies it only when the matching BD-J wrapper signature is present.
 - Added compact audio mode with AC-3 stereo/mono output for storage-limited

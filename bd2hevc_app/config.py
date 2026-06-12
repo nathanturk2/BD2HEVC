@@ -86,6 +86,7 @@ MPLS_PRIMARY_VIDEO_MPEG2 = bytes.fromhex("090110110000000000000502")
 HSCENE_MENU_START_SET_VISIBLE = bytes.fromhex("b2002704b60058")
 DEFAULT_VLC_COMPATIBILITY_MODE = "auto"
 KNOWN_VLC_COMPATIBILITY_FIXES = {
+    "music-jukebox-queued-state": "Close the previous Warner BD-J menu stack, render the authored music-jukebox popup/group together, queue the state change, and restore the default track focus if VLC/libbluray loses it.",
     "topmenu-mark-zero-on-return": "Normalize matching BD-J top-menu playlist returns to start at the menu entry point instead of a stale positive playmark.",
 }
 VLC_COMPATIBILITY_FIX_ALIASES = {}

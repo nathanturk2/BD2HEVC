@@ -45,6 +45,13 @@ def isolated_bdj_storage_env(base_dir: Path, label: str, *, create: bool = True)
     }
 
 
+def libbluray_debug_env(log_path: Path, mask: str) -> dict[str, str]:
+    return {
+        "BD_DEBUG_FILE": str(log_path.resolve()),
+        "BD_DEBUG_MASK": str(mask),
+    }
+
+
 def build_vlc_libbluray_record_command(
     *,
     vlc: str,
@@ -134,6 +141,7 @@ def create_libbluray_recording(
     duration: float | None = None,
     verbose_level: int = 3,
     isolated_bdj_storage: bool = False,
+    libbluray_debug_mask: str | None = None,
     dry_run: bool = False,
     keep_folder: bool = False,
 ) -> dict[str, Any]:
@@ -145,9 +153,11 @@ def create_libbluray_recording(
     session_dir = recordings_dir / f"{base_name}-{timestamp}"
     zip_path = recordings_dir / f"{session_dir.name}.zip"
     vlc_log = session_dir / "vlc-libbluray.log"
+    libbluray_debug_log = session_dir / "libbluray-debug.log"
     mapping = redaction_map([path for path in [root, root.parent, source_root, source_root.parent if source_root else None, session_dir] if path])
     cmd = build_vlc_libbluray_record_command(vlc=vlc, root=root, log_path=vlc_log, region=region, verbose_level=verbose_level)
     bdj_env = isolated_bdj_storage_env(session_dir / "bdj-storage", root.parent.name, create=False) if isolated_bdj_storage else {}
+    bd_debug_env = libbluray_debug_env(libbluray_debug_log, libbluray_debug_mask) if libbluray_debug_mask else {}
 
     if dry_run:
         return {
@@ -158,6 +168,8 @@ def create_libbluray_recording(
             "command": format_cmd(cmd),
             "isolated_bdj_storage": isolated_bdj_storage,
             "bdj_storage_env": bdj_env,
+            "libbluray_debug_mask": libbluray_debug_mask,
+            "libbluray_debug_env": bd_debug_env,
             "session_folder": str(session_dir),
             "bundle": str(zip_path),
         }
@@ -166,8 +178,10 @@ def create_libbluray_recording(
         workdir = Path(temp) / session_dir.name
         workdir.mkdir(parents=True)
         live_log = workdir / "vlc-libbluray.log"
+        live_libbluray_debug_log = workdir / "libbluray-debug.log"
         cmd = build_vlc_libbluray_record_command(vlc=vlc, root=root, log_path=live_log, region=region, verbose_level=verbose_level)
         bdj_env = isolated_bdj_storage_env(workdir / "bdj-storage", root.parent.name) if isolated_bdj_storage else {}
+        bd_debug_env = libbluray_debug_env(live_libbluray_debug_log, libbluray_debug_mask) if libbluray_debug_mask else {}
         started = time.time()
         write_libbluray_record_readme(workdir / "README.txt")
 
@@ -175,12 +189,15 @@ def create_libbluray_recording(
         print("Reproduce the failing menu/gallery path in VLC.")
         if isolated_bdj_storage:
             print("Using isolated libbluray BD-J cache/persistent storage for this recording.")
+        if libbluray_debug_mask:
+            print(f"Writing direct libbluray debug log with BD_DEBUG_MASK={libbluray_debug_mask}.")
         if duration:
             print(f"Recording will stop automatically after {duration:g} seconds.")
         else:
             print("When the failure has happened, return here and press Enter to finish the recording.")
         env = refreshed_env()
         env.update(bdj_env)
+        env.update(bd_debug_env)
         proc = subprocess.Popen(cmd, env=env)
         if duration:
             try:
@@ -202,7 +219,7 @@ def create_libbluray_recording(
                 proc.wait(timeout=10)
         ended = time.time()
 
-        mapping = redaction_map([path for path in [root, root.parent, source_root, source_root.parent if source_root else None, workdir, live_log] if path])
+        mapping = redaction_map([path for path in [root, root.parent, source_root, source_root.parent if source_root else None, workdir, live_log, live_libbluray_debug_log] if path])
         session: dict[str, Any] = {
             "bd2hevc_version": VERSION,
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ended)),
@@ -219,6 +236,9 @@ def create_libbluray_recording(
                 "verbose_level": verbose_level,
                 "isolated_bdj_storage": isolated_bdj_storage,
                 "bdj_storage_env": redact_value(bdj_env, mapping),
+                "libbluray_debug_mask": libbluray_debug_mask,
+                "libbluray_debug_env": redact_value(bd_debug_env, mapping),
+                "libbluray_debug_log": "logs/libbluray-debug.log" if libbluray_debug_mask else None,
                 "command": redact_text(format_cmd(cmd), mapping),
                 "log": "logs/vlc-libbluray.log",
             },
@@ -227,6 +247,9 @@ def create_libbluray_recording(
         (workdir / "recording.json").write_text(json.dumps(session, indent=2), encoding="utf-8")
         _copy_log_text(live_log, workdir / "logs" / "vlc-libbluray.log", mapping)
         write_log_highlights(live_log, workdir / "logs" / "vlc-libbluray.error-highlights.txt", mapping)
+        if libbluray_debug_mask:
+            _copy_log_text(live_libbluray_debug_log, workdir / "logs" / "libbluray-debug.log", mapping)
+            write_log_highlights(live_libbluray_debug_log, workdir / "logs" / "libbluray-debug.error-highlights.txt", mapping)
 
         recordings_dir.mkdir(parents=True, exist_ok=True)
         if keep_folder:

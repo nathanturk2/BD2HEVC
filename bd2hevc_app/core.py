@@ -73,7 +73,7 @@ from .config import (
 )
 from .diagnostics import DEFAULT_DIAGNOSTIC_LOG_LINES, cmd_diagnose
 from .encoding import encode_to_hevc_m2ts, transcode_compact_audio_tracks
-from .libbluray_record import create_libbluray_recording, isolated_bdj_storage_env
+from .libbluray_record import create_libbluray_recording, isolated_bdj_storage_env, libbluray_debug_env
 from .muxing import (
     author_m2ts_split,
     author_uhdbd_split,
@@ -2564,6 +2564,7 @@ def cmd_record_libbluray(args: argparse.Namespace) -> int:
         duration=args.duration,
         verbose_level=args.verbose_level,
         isolated_bdj_storage=args.isolated_bdj_storage,
+        libbluray_debug_mask=args.libbluray_debug_mask,
         dry_run=args.dry_run,
         keep_folder=args.no_zip,
     )
@@ -2576,6 +2577,8 @@ def cmd_record_libbluray(args: argparse.Namespace) -> int:
             print(f"Source: {result['source']}")
         print(f"Would save to: {result['bundle']}")
         print(f"VLC command: {result['command']}")
+        if result.get("libbluray_debug_mask"):
+            print(f"Direct libbluray debug mask: {result['libbluray_debug_mask']}")
     else:
         print("BD2HEVC VLC/libbluray recording complete.")
         print(f"Saved to: {result['bundle']}")
@@ -3037,6 +3040,7 @@ def build_parser() -> argparse.ArgumentParser:
   py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --source "BD backups\\Movie Disc" --label movie-gallery
   py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --region A --duration 120
   py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --isolated-bdj-storage
+  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --libbluray-debug-mask
 """)
     p_record.add_argument("target", help="Converted output folder, source backup folder, or disc folder to open in VLC.")
     p_record.add_argument("--source", default=None, help="Original source backup for reference file manifests.")
@@ -3046,6 +3050,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_record.add_argument("--duration", type=float, default=None, help="Automatically stop after N seconds instead of waiting for Enter.")
     p_record.add_argument("--verbose-level", type=int, default=3, choices=[0, 1, 2, 3, 4], help="VLC verbosity level. Default 3 for libbluray debugging.")
     p_record.add_argument("--isolated-bdj-storage", action="store_true", help="Run VLC with per-recording libbluray BD-J cache and persistent storage roots.")
+    p_record.add_argument("--libbluray-debug-mask", nargs="?", const="0x3e940", default=None, help="Also set BD_DEBUG_FILE and BD_DEBUG_MASK for a direct libbluray log. With no value, captures CRIT, BluRay, NAV, BD-J, stream, graphics, decode, and JNI categories.")
     p_record.add_argument("--no-zip", action="store_true", help="Write an unpacked recording folder instead of a zip.")
     p_record.add_argument("--dry-run", action="store_true", help="Show the VLC command and bundle path without opening VLC.")
     p_record.add_argument("--json", action="store_true", help="Print machine-readable command output.")

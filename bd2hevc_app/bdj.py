@@ -362,6 +362,17 @@ def find_cp_methodref(entries: list[dict[str, Any] | None], class_name: str, nam
     return None
 
 
+def find_cp_interface_methodref(entries: list[dict[str, Any] | None], class_name: str, name: str, descriptor: str) -> int | None:
+    class_index = find_cp_class(entries, class_name)
+    name_type_index = find_cp_name_and_type(entries, name, descriptor)
+    if not class_index or not name_type_index:
+        return None
+    for index, entry in enumerate(entries):
+        if entry and entry.get("tag") == 11 and entry.get("index1") == class_index and entry.get("index2") == name_type_index:
+            return index
+    return None
+
+
 def find_cp_fieldref(entries: list[dict[str, Any] | None], class_name: str | None, name: str, descriptor: str) -> int | None:
     class_index = find_cp_class(entries, class_name) if class_name else None
     name_type_index = find_cp_name_and_type(entries, name, descriptor)
@@ -424,6 +435,27 @@ def add_cp_methodref(data: bytes, class_name: str, method_name: str, descriptor:
     name_type_index = add_cp_name_and_type(entries, additions, method_name, descriptor)
     methodref_index = len(entries)
     additions.append(b"\x0a" + class_index.to_bytes(2, "big") + name_type_index.to_bytes(2, "big"))
+    new_cp_count = int.from_bytes(data[8:10], "big") + len(additions)
+    if new_cp_count > 0xFFFF:
+        raise ToolError("Constant pool would exceed Java class limit")
+    patched = data[:8] + new_cp_count.to_bytes(2, "big") + data[10:cp_end] + b"".join(additions) + data[cp_end:]
+    return patched, methodref_index
+
+
+def add_cp_interface_methodref(data: bytes, class_name: str, method_name: str, descriptor: str) -> tuple[bytes, int]:
+    entries, cp_end = parse_constant_pool(data)
+    existing = find_cp_interface_methodref(entries, class_name, method_name, descriptor)
+    if existing:
+        return data, existing
+    class_index = find_cp_class(entries, class_name)
+    if not class_index:
+        additions: list[bytes] = []
+        class_index = add_cp_class(entries, additions, class_name)
+    else:
+        additions = []
+    name_type_index = add_cp_name_and_type(entries, additions, method_name, descriptor)
+    methodref_index = len(entries)
+    additions.append(b"\x0b" + class_index.to_bytes(2, "big") + name_type_index.to_bytes(2, "big"))
     new_cp_count = int.from_bytes(data[8:10], "big") + len(additions)
     if new_cp_count > 0xFFFF:
         raise ToolError("Constant pool would exceed Java class limit")
@@ -626,6 +658,207 @@ def patch_topmenu_mark_zero_on_return(data: bytes) -> tuple[bytes, dict[str, Any
         old=old,
         new=guard + old,
         label="normalize top-menu playlist return mark",
+        expected_matches=1,
+    )
+
+
+def patch_music_jukebox_button_queues_state(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    entries, _ = parse_constant_pool(data)
+    x_instance_method = find_cp_methodref(entries, "com/wb/bdj/controller/x", "a", "()Lcom/wb/bdj/controller/x;")
+    direct_change_method = find_cp_methodref(
+        entries,
+        "com/wb/bdj/controller/x",
+        "a",
+        "(Ljava/lang/String;Lcom/wb/bdj/controller/q;)V",
+    )
+    state_field = find_cp_fieldref(entries, "com/wb/bdj/menu/SpecialFeatureClipButtonHelper", "a", "Ljava/lang/String;")
+    be_class = find_cp_class(entries, "com/wb/bdj/menu/be")
+    jukebox_menu_field = find_cp_fieldref(entries, "com/wb/bdj/menu/be", "y", "Lcom/wb/bdj/menu/k;")
+    playlist_menu_field = find_cp_fieldref(entries, "com/wb/bdj/menu/be", "z", "Lcom/wb/bdj/menu/k;")
+    add_menu_method = find_cp_interface_methodref(entries, "com/wb/bdj/menu/am", "a", "(Lcom/wb/bdj/menu/k;)V")
+    if not (
+        x_instance_method
+        and direct_change_method
+        and state_field
+        and be_class
+        and jukebox_menu_field
+        and playlist_menu_field
+        and add_menu_method
+    ):
+        return data, {
+            "label": "close previous menu stack and queue music jukebox state after menu additions",
+            "matches": 0,
+            "already_patched": False,
+            "error": "required Warner music jukebox references were not found",
+        }
+    patched, queued_change_method = add_cp_interface_methodref(
+        data,
+        "com/wb/bdj/menu/am",
+        "a",
+        "(Ljava/lang/String;Lcom/wb/bdj/controller/q;)V",
+    )
+    patched, focus_button_method = add_cp_interface_methodref(
+        patched,
+        "com/wb/bdj/menu/am",
+        "a",
+        "(Lcom/wb/bdj/menu/b;)V",
+    )
+    patched, close_menu_method = add_cp_interface_methodref(patched, "com/wb/bdj/menu/am", "c", "()V")
+    patched, show_menu_method = add_cp_interface_methodref(patched, "com/wb/bdj/menu/am", "a", "()V")
+    patched, default_button_method = add_cp_methodref(patched, "com/wb/bdj/menu/k", "h", "()Lcom/wb/bdj/menu/b;")
+    old = (
+        b"\xb8" + x_instance_method.to_bytes(2, "big")
+        + b"\x2a\xb4" + state_field.to_bytes(2, "big")
+        + b"\x01\xb6" + direct_change_method.to_bytes(2, "big")
+        + b"\x2b\xc1" + be_class.to_bytes(2, "big")
+        + b"\x99\x00\x1d"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + jukebox_menu_field.to_bytes(2, "big")
+        + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + playlist_menu_field.to_bytes(2, "big")
+        + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
+        + b"\xb1"
+    )
+    menu_additions = (
+        b"\x2b\xc1" + be_class.to_bytes(2, "big")
+        + b"\x99\x00\x1d"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + jukebox_menu_field.to_bytes(2, "big")
+        + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + playlist_menu_field.to_bytes(2, "big")
+        + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
+    )
+    focused_menu_additions = (
+        b"\x2b\xc1" + be_class.to_bytes(2, "big")
+        + b"\x99\x00\x2d"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + jukebox_menu_field.to_bytes(2, "big")
+        + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + playlist_menu_field.to_bytes(2, "big")
+        + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + playlist_menu_field.to_bytes(2, "big")
+        + b"\xb6" + default_button_method.to_bytes(2, "big")
+        + b"\xb9" + focus_button_method.to_bytes(2, "big") + b"\x02\x00"
+    )
+    queued_state_change = (
+        menu_additions
+        + b"\x2c\x2a\xb4" + state_field.to_bytes(2, "big")
+        + b"\x01\xb9" + queued_change_method.to_bytes(2, "big") + b"\x03\x00"
+        + b"\xb1"
+    )
+    focused_queued_state_change = (
+        focused_menu_additions
+        + b"\x2c\x2a\xb4" + state_field.to_bytes(2, "big")
+        + b"\x01\xb9" + queued_change_method.to_bytes(2, "big") + b"\x03\x00"
+        + b"\xb1"
+    )
+    cleanup = (
+        b"\x2c\xb9" + close_menu_method.to_bytes(2, "big") + b"\x01\x00"
+        + b"\x2c\xb9" + show_menu_method.to_bytes(2, "big") + b"\x01\x00"
+    )
+    label = "close previous menu stack and queue music jukebox state after menu additions"
+    updated, report = replace_in_method_code_resized(
+        patched,
+        method_name="a",
+        descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
+        old=old,
+        new=cleanup + focused_queued_state_change,
+        label=label,
+        expected_matches=1,
+    )
+    if report.get("matches") or report.get("already_patched") or report.get("error"):
+        return updated, report
+    updated, focused_upgrade_report = replace_in_method_code_resized(
+        patched,
+        method_name="a",
+        descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
+        old=cleanup + queued_state_change,
+        new=cleanup + focused_queued_state_change,
+        label=label,
+        expected_matches=1,
+    )
+    if focused_upgrade_report.get("matches") or focused_upgrade_report.get("already_patched") or focused_upgrade_report.get("error"):
+        focused_upgrade_report["upgraded_previous_patch"] = bool(focused_upgrade_report.get("matches"))
+        return updated, focused_upgrade_report
+    updated, upgrade_report = replace_in_method_code_resized(
+        patched,
+        method_name="a",
+        descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
+        old=queued_state_change,
+        new=cleanup + focused_queued_state_change,
+        label=label,
+        expected_matches=1,
+    )
+    if upgrade_report.get("matches") or upgrade_report.get("already_patched") or upgrade_report.get("error"):
+        upgrade_report["upgraded_previous_patch"] = bool(upgrade_report.get("matches"))
+        return updated, upgrade_report
+    report["previous_patch_matches"] = upgrade_report.get("matches", 0)
+    return patched, report
+
+
+def patch_music_jukebox_state_restores_default_focus(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    entries, _ = parse_constant_pool(data)
+    current_button_method = find_cp_interface_methodref(entries, "com/wb/bdj/menu/am", "b", "()Lcom/wb/bdj/menu/b;")
+    focus_button_method = find_cp_interface_methodref(entries, "com/wb/bdj/menu/am", "a", "(Lcom/wb/bdj/menu/b;)V")
+    helper_method = find_cp_methodref(entries, "com/wb/bdj/menu/l", "w", "()Lcom/wb/bdj/menu/bk;")
+    playlist_menu_class = find_cp_class(entries, "com/wb/bdj/menu/k")
+    if not (current_button_method and helper_method and playlist_menu_class):
+        return data, {
+            "label": "restore music jukebox default focus before key handling",
+            "matches": 0,
+            "already_patched": False,
+            "error": "required Warner music jukebox state references were not found",
+        }
+    patched = data
+    if not focus_button_method:
+        patched, focus_button_method = add_cp_interface_methodref(
+            patched,
+            "com/wb/bdj/menu/am",
+            "a",
+            "(Lcom/wb/bdj/menu/b;)V",
+        )
+    patched, default_button_method = add_cp_methodref(patched, "com/wb/bdj/menu/k", "h", "()Lcom/wb/bdj/menu/b;")
+    entries, _ = parse_constant_pool(patched)
+    current_button_method = find_cp_interface_methodref(entries, "com/wb/bdj/menu/am", "b", "()Lcom/wb/bdj/menu/b;")
+    focus_button_method = find_cp_interface_methodref(entries, "com/wb/bdj/menu/am", "a", "(Lcom/wb/bdj/menu/b;)V")
+    helper_method = find_cp_methodref(entries, "com/wb/bdj/menu/l", "w", "()Lcom/wb/bdj/menu/bk;")
+    playlist_menu_class = find_cp_class(entries, "com/wb/bdj/menu/k")
+    if not (current_button_method and focus_button_method and helper_method and playlist_menu_class and default_button_method):
+        return data, {
+            "label": "restore music jukebox default focus before key handling",
+            "matches": 0,
+            "already_patched": False,
+            "error": "could not add required Warner music jukebox state references",
+        }
+    old = (
+        b"\x2c\xb9" + current_button_method.to_bytes(2, "big") + b"\x01\x00"
+        + b"\xb6" + helper_method.to_bytes(2, "big")
+        + b"\x3a\x04"
+    )
+    new = (
+        b"\x2c\xb9" + current_button_method.to_bytes(2, "big") + b"\x01\x00"
+        + b"\x3a\x04"
+        + b"\x19\x04\xc7\x00\x13"
+        + b"\x2c\x2d\xc0" + playlist_menu_class.to_bytes(2, "big")
+        + b"\xb6" + default_button_method.to_bytes(2, "big")
+        + b"\x59\x3a\x04"
+        + b"\xb9" + focus_button_method.to_bytes(2, "big") + b"\x02\x00"
+        + b"\x19\x04\xc7\x00\x07"
+        + b"\x01\xa7\x00\x08"
+        + b"\x19\x04\xb6" + helper_method.to_bytes(2, "big")
+        + b"\x3a\x04"
+    )
+    return replace_in_method_code_resized(
+        patched,
+        method_name="a",
+        descriptor="(ILcom/wb/bdj/menu/am;)Z",
+        old=old,
+        new=new,
+        label="restore music jukebox default focus before key handling",
         expected_matches=1,
     )
 
@@ -992,9 +1225,153 @@ def patch_bluray_vlc_menu_jar(jar_path: Path, *, fixes: list[str], backup: bool 
                     raise ToolError(f"Could not safely patch {jar_path}: {entry_report}")
                 report["patched"] = report["patched"] or entry_report["patched"]
                 report["already_patched"] = report["already_patched"] or entry_report["already_patched"]
+            if info.filename == "com/wb/bdj/menu/MusicJukeboxButtonHelper.class":
+                entry_report = {"entry": info.filename, "patches": []}
+                if "music-jukebox-queued-state" in fixes:
+                    data, jukebox_patch = patch_music_jukebox_button_queues_state(data)
+                    entry_report["patches"].append(jukebox_patch)
+                entry_report["patched"] = any(p.get("matches") == 1 for p in entry_report["patches"])
+                entry_report["already_patched"] = any(p.get("already_patched") for p in entry_report["patches"])
+                entry_report["ok"] = all("error" not in p for p in entry_report["patches"]) and (
+                    not entry_report["patches"] or entry_report["patched"] or entry_report["already_patched"]
+                )
+                report["entries"].append(entry_report)
+                if not entry_report["ok"]:
+                    temp_path.unlink(missing_ok=True)
+                    raise ToolError(f"Could not safely patch {jar_path}: {entry_report}")
+                report["patched"] = report["patched"] or entry_report["patched"]
+                report["already_patched"] = report["already_patched"] or entry_report["already_patched"]
+            if info.filename == "com/wb/bdj/controller/MusicJukeboxState.class":
+                entry_report = {"entry": info.filename, "patches": []}
+                if "music-jukebox-queued-state" in fixes:
+                    data, focus_patch = patch_music_jukebox_state_restores_default_focus(data)
+                    entry_report["patches"].append(focus_patch)
+                entry_report["patched"] = any(p.get("matches") == 1 for p in entry_report["patches"])
+                entry_report["already_patched"] = any(p.get("already_patched") for p in entry_report["patches"])
+                entry_report["ok"] = all("error" not in p for p in entry_report["patches"]) and (
+                    not entry_report["patches"] or entry_report["patched"] or entry_report["already_patched"]
+                )
+                report["entries"].append(entry_report)
+                if not entry_report["ok"]:
+                    temp_path.unlink(missing_ok=True)
+                    raise ToolError(f"Could not safely patch {jar_path}: {entry_report}")
+                report["patched"] = report["patched"] or entry_report["patched"]
+                report["already_patched"] = report["already_patched"] or entry_report["already_patched"]
             zout.writestr(clone_zip_info(info), data)
     report["replace"] = replace_file_with_retry(temp_path, jar_path)
     return report
+
+
+def parse_simple_properties(text: str) -> dict[str, str]:
+    props: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        props[key.strip()] = value.strip()
+    return props
+
+
+def music_jukebox_menu_layers(props: dict[str, str]) -> list[dict[str, str]]:
+    layers: list[dict[str, str]] = []
+    for key, value in props.items():
+        if not key.endswith(".class"):
+            continue
+        if not value.startswith("com.wb.bdj.menu.MusicJukeboxButtonHelper,"):
+            continue
+        button_id = key[:-6]
+        popup_id = props.get(f"{button_id}.jukeboxMenuId")
+        group_id = props.get(f"{button_id}.playlistMenuId")
+        if not popup_id or not group_id:
+            continue
+        if props.get(f"{popup_id}.type") != "Menu" or props.get(f"{group_id}.type") != "RadioGroup":
+            continue
+        children = props.get(f"{popup_id}.children")
+        group_children = props.get(f"{group_id}.children")
+        if not children or not group_children:
+            continue
+        layers.append(
+            {
+                "button": button_id,
+                "popup": popup_id,
+                "group": group_id,
+                "children": children,
+            }
+        )
+    return layers
+
+
+def patch_music_jukebox_menu_layer_properties(prop_path: Path, *, backup: bool = True) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "file": str(prop_path),
+        "exists": prop_path.exists(),
+        "patched": False,
+        "already_patched": False,
+        "layers": [],
+    }
+    if not prop_path.exists():
+        return report
+    text = prop_path.read_bytes().decode("ISO-8859-1")
+    props = parse_simple_properties(text)
+    layers = music_jukebox_menu_layers(props)
+    if not layers:
+        report["skipped"] = True
+        report["reason"] = "no matching Warner music jukebox menu layer"
+        return report
+
+    updated = text
+    matched_layers: list[dict[str, Any]] = []
+    for layer in layers:
+        popup_id = layer["popup"]
+        group_id = layer["group"]
+        children = layer["children"]
+        child_ids = [item.strip() for item in children.split(",") if item.strip()]
+        layer_report: dict[str, Any] = {
+            "button": layer["button"],
+            "popup": popup_id,
+            "group": group_id,
+            "already_patched": group_id in child_ids,
+            "patched": False,
+        }
+        if group_id not in child_ids:
+            old_line = f"{popup_id}.children={children}"
+            new_line = f"{popup_id}.children={children},{group_id}"
+            if old_line not in updated:
+                layer_report["error"] = f"children line not found for {popup_id}"
+            else:
+                updated = updated.replace(old_line, new_line, 1)
+                layer_report["patched"] = True
+        matched_layers.append(layer_report)
+
+    errors = [layer for layer in matched_layers if layer.get("error")]
+    report["layers"] = matched_layers
+    if errors:
+        report["error"] = "; ".join(str(layer["error"]) for layer in errors)
+        return report
+    if updated != text:
+        backup_path = prop_path.with_suffix(prop_path.suffix + ".bak_before_codex_bdj_patch")
+        report["backup"] = str(backup_path) if backup else None
+        if backup and not backup_path.exists():
+            shutil.copy2(prop_path, backup_path)
+        prop_path.write_bytes(updated.encode("ISO-8859-1"))
+        report["patched"] = True
+    report["already_patched"] = bool(matched_layers) and all(layer.get("already_patched") for layer in matched_layers)
+    return report
+
+
+def patch_music_jukebox_menu_layers(root: Path, *, backup: bool = True) -> dict[str, Any]:
+    jar_dir = root / "BDMV" / "JAR"
+    prop_files = sorted(jar_dir.glob("*/menu_base.prop")) if jar_dir.is_dir() else []
+    reports = [patch_music_jukebox_menu_layer_properties(path, backup=backup) for path in prop_files]
+    matched = [item for item in reports if item.get("layers")]
+    return {
+        "target": str(root),
+        "patch": "music-jukebox-menu-layer",
+        "files": reports,
+        "patched": any(item.get("patched") for item in reports),
+        "already_patched": bool(matched) and all(item.get("already_patched") for item in matched),
+    }
 
 
 def patch_bluray_vlc_menu(target: Path, *, fixes: list[str] | None = None, backup: bool = True) -> dict[str, Any]:
@@ -1009,18 +1386,24 @@ def patch_bluray_vlc_menu(target: Path, *, fixes: list[str] | None = None, backu
     selected_fixes = canonical_vlc_fix_names(
         fixes
         or [
+            "music-jukebox-queued-state",
             "topmenu-mark-zero-on-return",
         ]
     )
     reports = [patch_bluray_vlc_menu_jar(jar, fixes=selected_fixes, backup=backup) for jar in jars]
+    resource_report = None
+    if "music-jukebox-queued-state" in selected_fixes:
+        resource_report = patch_music_jukebox_menu_layers(root, backup=backup)
     return {
         "target": str(root),
         "patch": "bluray-vlc-menu",
         "fixes": selected_fixes,
-        "warning": "experimental VLC/libbluray compatibility patch; backs up the original JAR before changing BD-J bytecode",
+        "warning": "experimental VLC/libbluray compatibility patch; backs up original BD-J files before changing them",
         "jars": reports,
-        "patched": any(item.get("patched") for item in reports),
-        "already_patched": all(item.get("already_patched") for item in reports if item.get("entries")),
+        "resources": resource_report,
+        "patched": any(item.get("patched") for item in reports) or bool(resource_report and resource_report.get("patched")),
+        "already_patched": all(item.get("already_patched") for item in reports if item.get("entries"))
+        and (not resource_report or resource_report.get("already_patched") or not resource_report.get("files")),
     }
 
 
@@ -1090,6 +1473,30 @@ def jar_has_topmenu_mark_zero_signature(jar_path: Path) -> bool:
     )
 
 
+def jar_has_music_jukebox_queued_state_signature(jar_path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(jar_path, "r") as zf:
+            try:
+                helper_data = zf.read("com/wb/bdj/menu/MusicJukeboxButtonHelper.class")
+                state_data = zf.read("com/wb/bdj/controller/MusicJukeboxState.class")
+            except KeyError:
+                return False
+    except zipfile.BadZipFile:
+        return False
+    patch_checks = (
+        (helper_data, patch_music_jukebox_button_queues_state),
+        (state_data, patch_music_jukebox_state_restores_default_focus),
+    )
+    for data, patcher in patch_checks:
+        try:
+            _, report = patcher(data)
+        except Exception:
+            return False
+        if report.get("error") or not (report.get("matches") == 1 or report.get("already_patched")):
+            return False
+    return True
+
+
 def should_apply_hscene_menu_vlc_patch(root: Path) -> bool:
     jar_dirs = [root / "BDMV" / "JAR", root / "BDMV" / "BACKUP" / "JAR"]
     for jar_dir in jar_dirs:
@@ -1097,6 +1504,17 @@ def should_apply_hscene_menu_vlc_patch(root: Path) -> bool:
             continue
         for jar_path in jar_dir.glob("*.jar"):
             if jar_has_topmenu_mark_zero_signature(jar_path):
+                return True
+    return False
+
+
+def should_apply_music_jukebox_vlc_patch(root: Path) -> bool:
+    jar_dirs = [root / "BDMV" / "JAR", root / "BDMV" / "BACKUP" / "JAR"]
+    for jar_dir in jar_dirs:
+        if not jar_dir.is_dir():
+            continue
+        for jar_path in jar_dir.glob("*.jar"):
+            if jar_has_music_jukebox_queued_state_signature(jar_path):
                 return True
     return False
 
@@ -1114,13 +1532,19 @@ def patch_known_bdj_compatibility(
     patches: list[dict[str, Any]] = []
     requested = ["auto"] if fixes is None else canonical_vlc_fix_names(list(fixes))
     known_requested = [
+        "music-jukebox-queued-state",
         "topmenu-mark-zero-on-return",
     ] if "auto" in requested else requested
     unknown = [name for name in known_requested if name not in KNOWN_VLC_COMPATIBILITY_FIXES]
     if unknown:
         raise ToolError(f"Unknown VLC compatibility fix: {', '.join(unknown)}")
-    if known_requested and should_apply_hscene_menu_vlc_patch(root):
-        patches.append(patch_bluray_vlc_menu(root, fixes=known_requested, backup=True))
+    applicable_known: list[str] = []
+    if "music-jukebox-queued-state" in known_requested and should_apply_music_jukebox_vlc_patch(root):
+        applicable_known.append("music-jukebox-queued-state")
+    if "topmenu-mark-zero-on-return" in known_requested and should_apply_hscene_menu_vlc_patch(root):
+        applicable_known.append("topmenu-mark-zero-on-return")
+    if applicable_known:
+        patches.append(patch_bluray_vlc_menu(root, fixes=applicable_known, backup=True))
     for patch_file in custom_patch_files or []:
         custom_specs = load_custom_compatibility_patch_file(patch_file)
         jar_dirs = [root / "BDMV" / "JAR", root / "BDMV" / "BACKUP" / "JAR"]

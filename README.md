@@ -531,11 +531,21 @@ Apply compatibility fixes to an existing converted output:
 python bd2hevc.py patch-vlc-compat "Converted UHD-BD/Disc (BD) (UHD converted)"
 ```
 
-The built-in fix can also be selected explicitly:
+Built-in fixes can also be selected explicitly:
 
 ```bash
 python bd2hevc.py auto "Disc" --vlc-fix topmenu-mark-zero-on-return
+python bd2hevc.py auto "Disc" --vlc-fix music-jukebox-queued-state
 ```
+
+For matching Warner-style music jukebox BD-J menus,
+`music-jukebox-queued-state` closes the previous menu stack using the disc's
+own menu transaction calls, keeps the authored jukebox popup and track group
+together when extracted menu resources match, then queues the playlist-state
+change so VLC/libbluray can render the track picker before switching playlists.
+It also restores the authored default track focus when the queued state receives
+input with no current button, avoiding a VLC/libbluray null-focus path while
+leaving the disc's own playback helper in charge.
 
 For matching BlueMoon-style BD-J menus, `topmenu-mark-zero-on-return` handles
 discs where VLC/libbluray returns to a top-menu playlist at a positive playmark
@@ -624,6 +634,7 @@ Useful options:
 python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --region A
 python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --duration 120
 python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --isolated-bdj-storage
+python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --libbluray-debug-mask
 python bd2hevc.py record-libbluray "Converted UHD-BD/My Disc (BD) (UHD converted)" --dry-run
 ```
 
@@ -631,6 +642,12 @@ Use `--isolated-bdj-storage` when a BD-J problem is intermittent or when you
 are comparing an original backup against a converted output. It gives VLC a
 fresh libbluray cache and persistent-storage root for that recording so stale
 BD-J state is less likely to hide the failure or create a false one.
+
+Use `--libbluray-debug-mask` when VLC's normal verbose log is not enough. With
+no value it captures libbluray critical, BluRay, NAV, BD-J, stream, graphics,
+decode, and JNI categories into a separate `logs/libbluray-debug.log` file in
+the bundle. You can pass a custom mask such as `--libbluray-debug-mask 0x2140`
+for a narrower direct libbluray log.
 
 The recorder does not include `.m2ts` media, BD-J JAR contents, keys, decryption
 logs, or raw disc assets. It is meant to capture VLC/libbluray state and log
