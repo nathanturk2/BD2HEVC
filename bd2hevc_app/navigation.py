@@ -113,8 +113,7 @@ def patch_clpi_for_hevc(path: Path, *, patch_version_headers: bool = False) -> d
         data[4:8] = b"0300"
         version_changed = True
     stream_patches = 0
-    for source_pattern in (CLPI_PRIMARY_VIDEO_AVC, CLPI_PRIMARY_VIDEO_MPEG2):
-        stream_patches += replace_in_range(data, 0, len(data), source_pattern, CLPI_PRIMARY_VIDEO_HEVC)
+    stream_patches += patch_clpi_primary_video_descriptors(data)
     if data != original:
         path.write_bytes(data)
     return {
@@ -124,6 +123,19 @@ def patch_clpi_for_hevc(path: Path, *, patch_version_headers: bool = False) -> d
         "version_changed": version_changed,
         "primary_video_patches": stream_patches,
     }
+
+
+def patch_clpi_primary_video_descriptors(data: bytearray) -> int:
+    patches = 0
+    prefix = CLPI_PRIMARY_VIDEO_HEVC[:4]
+    for index in range(0, max(0, len(data) - len(prefix) - 1)):
+        if data[index : index + len(prefix)] != prefix:
+            continue
+        if data[index + len(prefix)] not in (CLPI_PRIMARY_VIDEO_AVC[4], CLPI_PRIMARY_VIDEO_MPEG2[4]):
+            continue
+        data[index + len(prefix)] = CLPI_PRIMARY_VIDEO_HEVC[4]
+        patches += 1
+    return patches
 
 
 def clpi_offsets(data: bytes | bytearray) -> dict[str, int]:

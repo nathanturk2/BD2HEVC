@@ -770,6 +770,18 @@ class CopyPlanningTests(unittest.TestCase):
             self.assertTrue(mpls_report["version_changed"])
             self.assertEqual(mpls.read_bytes()[:8], b"MPLS0300")
 
+    def test_navigation_patch_handles_interlaced_avc_clpi_descriptor(self) -> None:
+        with TemporaryDirectory() as temp:
+            clpi = Path(temp) / "00024.clpi"
+            clpi.write_bytes(b"HDMV0200" + bytes.fromhex("001011151b4430") + b"payload")
+
+            report = navigation.patch_clpi_for_hevc(clpi)
+
+            self.assertTrue(report["patched"])
+            self.assertEqual(report["primary_video_patches"], 1)
+            self.assertIn(bytes.fromhex("00101115244430"), clpi.read_bytes())
+            self.assertNotIn(bytes.fromhex("001011151b4430"), clpi.read_bytes())
+
     def test_short_repeated_playitem_clips_detects_menu_style_playlist(self) -> None:
         def item(clip_id: str, start: int, end: int) -> bytes:
             body = clip_id.encode("ascii") + b"M2TS" + b"\x00" * 3 + start.to_bytes(4, "big") + end.to_bytes(4, "big") + b"\x00" * 24
@@ -1013,6 +1025,33 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertNotIn("0:s?", cmd)
         self.assertIn("-f", cmd)
         self.assertIn("mpegts", cmd)
+
+    def test_replacement_m2ts_meta_uses_stream_muxing_not_bluray_folder_mode(self) -> None:
+        tracks = [
+            {"track": "4113", "stream_id": "V_MPEG4/ISO/AVC"},
+            {"track": "4352", "stream_id": "A_AC3", "stream_lang": "eng"},
+            {"track": "4608", "stream_id": "S_HDMV/PGS", "stream_lang": "eng"},
+        ]
+        clip_info = {"video": {"fps": 23.976, "width": 1920, "height": 1080}}
+        with TemporaryDirectory() as temp, mock.patch.object(muxing, "parse_tsmuxer_tracks", return_value=tracks):
+            root = Path(temp)
+            meta = root / "00001.meta"
+
+            muxing.write_tsmuxer_m2ts_split_meta(
+                root / "00001.hevc.tmp",
+                root / "source.m2ts",
+                meta,
+                clip_info,
+                {"tsmuxer": "tsmuxer"},
+            )
+
+            text = meta.read_text(encoding="utf-8")
+
+        self.assertIn("MUXOPT --no-pcr-on-video-pid --vbr --new-audio-pes --vbv-len=500", text)
+        self.assertNotIn("--blu-ray-v3", text)
+        self.assertIn("V_MPEGH/ISO/HEVC", text)
+        self.assertIn("A_AC3", text)
+        self.assertIn("S_HDMV/PGS", text)
 
     def test_compact_audio_tracks_are_elementary_ac3_files(self) -> None:
         clip_info = {
