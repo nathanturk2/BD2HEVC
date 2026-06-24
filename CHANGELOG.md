@@ -64,11 +64,23 @@
   Warner-style BD-J music jukebox menus, including faithful previous-menu
   cleanup, authored track-group layering for matching extracted menu resources,
   and null-focus recovery before the disc's original playback helper runs.
+- Hardened the Warner music-jukebox fix so the authored playlist group is
+  attached to the popup instance, the queued state change completes before
+  default-track focus is restored, and stale startup playback is stopped. The
+  patch can also upgrade outputs made by earlier versions of the fix.
 - Generalized the validated BD-J top-menu compatibility fix so auto mode
   applies it only when the matching BD-J wrapper signature is present.
 - Added compact audio mode with AC-3 stereo/mono output for storage-limited
   conversions, plus validation checks for compact audio stream count, codecs,
   and channel layout.
+- Extended compact audio to copied and already-HEVC clips through audio-only
+  remuxing, preserving the existing video and subtitle streams.
+- Added `repair-compact-audio` for rollback-safe in-place conversion of older
+  outputs to AC-3 mono/stereo without needing the original source backup. It
+  supports dry-run plans, clip limits, custom bitrates, JSON reports, and
+  optional required MakeMKV validation.
+- Compact-audio navigation repair now updates CLPI/MPLS audio descriptors from
+  source codecs such as LPCM to AC-3 and rescales CPI packet maps after remux.
 - Added `--main-title-cq` so compact CQ profiles can use a higher-quality CQ
   for the longest movie/title while keeping extras at the general CQ.
 - Improved compact CQ behavior so it directly uses the requested CQ for all
@@ -78,6 +90,9 @@
   so watch output no longer appears frozen during long clips.
 - Made queueing faster and cleaner by moving full plan generation into the
   background job instead of creating a foreground placeholder plan.
+- Made fixed-CQ planning substantially faster with metadata-first selective
+  bitrate analysis: packet summation and coded-padding scans now run only for
+  clips whose final quality mode actually depends on source bitrate.
 - Hardened queue job-file writes and reads against transient empty JSON files
   and Windows file-replacement races while status is watching a running queue.
 - Clarified queued job status so later jobs show how many jobs are ahead
@@ -134,6 +149,9 @@
   transport null packets and safe coded-video padding in source BD backups.
 - Compact stereo audio now skips unplayable zero-channel streams that FFprobe
   can misidentify as audio, and maps source audio by stream index.
+- Compact-audio validation now filters zero-channel probe artifacts on both
+  sides and checks copied video codec, subtitle codecs, duration, timestamps,
+  channel layout, and decode samples before in-place replacement is committed.
 - Improved generated output names with acronym and Roman numeral preservation,
   backed by CC0 acronym data plus media-specific terms.
 - Improved sparse silent menu/gallery clip detection so still-like video-only

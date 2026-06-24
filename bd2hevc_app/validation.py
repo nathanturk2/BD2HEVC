@@ -59,7 +59,7 @@ def validate_clip(
     if source_clip and source_clip.exists():
         src = inspect_clip(source_clip, tools, accurate_video_bitrate=False)
         src_audio = compact_audio_source_streams(src) if audio_mode == "compact-stereo" else src.get("audio", [])
-        out_audio = out.get("audio", [])
+        out_audio = compact_audio_source_streams(out) if audio_mode == "compact-stereo" else out.get("audio", [])
         if audio_mode == "compact-stereo":
             result["checks"].append(
                 {

@@ -59,7 +59,7 @@ guaranteed.
   default workflow keeps the source resolution and does not upscale. Optional
   deinterlacing can be enabled for interlaced source clips.
 - Audio: passed through by default, with optional compact AC-3 stereo/mono for
-  storage-limited collections.
+  every playable track and in-place repair for older converted backups.
 - Not included: decryption, keys, ripping from protected discs, downloads, or
   copyrighted disc assets.
 
@@ -464,10 +464,11 @@ space on discs with TrueHD/DTS-HD and many dub tracks:
 python bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
 ```
 
-This converts each audio track in reencoded clips to Blu-ray-friendly AC-3,
-using stereo for multi-channel sources and mono for mono sources. PGS subtitles
-are still preserved from the source clip. Defaults are `256k` for stereo and
-`128k` for mono; adjust them with `--stereo-audio-bitrate` and
+This converts every playable audio track to Blu-ray-friendly AC-3, including
+clips whose video is copied or already HEVC. Multi-channel sources become
+stereo and mono sources remain mono. PGS subtitles and the existing video
+bitstream are preserved for audio-only remuxes. Defaults are `256k` for stereo
+and `128k` for mono; adjust them with `--stereo-audio-bitrate` and
 `--mono-audio-bitrate`. Audio passthrough remains the default.
 
 ## Optional Post-Processing
@@ -801,8 +802,8 @@ bd2hevc tools
 - Copies the full source backup structure.
 - Reencodes non-HEVC video clips longer than 10 seconds to HEVC.
 - Passes audio and PGS subtitle streams through unchanged by default.
-- Optionally converts audio in reencoded clips to compact AC-3 stereo/mono with
-  `--audio-mode compact-stereo`.
+- Optionally converts every playable audio track to compact AC-3 stereo/mono
+  with `--audio-mode compact-stereo`, including clips whose video is copied.
 - Keeps source resolution. No upscaling is done by `auto`.
 - Patches CLPI/MPLS video descriptors so replacement clips are described as
   HEVC.
@@ -835,6 +836,14 @@ on data that was only there to satisfy the authored disc's rate-control/transpor
 constraints. `--keep-source-padding` keeps the previous padded-source estimate
 for comparisons, and `--uhd-profile disc` keeps the padded total for more
 conservative physical-disc experiments.
+
+Planning runs in two stages. BD2HEVC first gathers lightweight stream metadata,
+applies quality and clip overrides, then performs full packet/padding scans only
+for clips whose final output is bitrate-driven. Fixed-CQ clips do not use source
+bitrate to choose their encoder settings, so skipping those expensive scans
+keeps the same CQ/maxrate/buffer plan while substantially reducing planning
+time. `--fast-bitrate` remains available when approximate VBR planning is
+acceptable.
 
 For clips that use different source codecs, `balanced`, `smaller`, and
 `transparent` all start from the same source-equivalent curve and then apply a
@@ -1033,6 +1042,24 @@ Known limits and watch areas:
   with the default 8-bit Main output for 8-bit BD sources.
 
 ## Repair And Diagnostics
+
+Convert non-compact audio in an existing converted backup without reencoding
+its video:
+
+```bash
+python bd2hevc.py repair-compact-audio "Converted UHD-BD/My Disc (BD) (UHD converted)" --dry-run
+python bd2hevc.py repair-compact-audio "Converted UHD-BD/My Disc (BD) (UHD converted)" --require-makemkv
+```
+
+`repair-compact-audio` does not require the original source backup. It scans the
+existing output, selects playable tracks that do not already match the AC-3
+mono/stereo targets, stream-copies video and PGS subtitles, and updates
+CLPI/MPLS audio descriptors and packet maps. Only one clip is replaced at a
+time: the previous M2TS and CLPI bytes are retained until codec, subtitle,
+timestamp, duration, and decode validation succeeds; that clip's navigation
+descriptors are then patched before the command advances.
+Use `--clips 00004 00012` to limit the repair, `--stereo-audio-bitrate` and
+`--mono-audio-bitrate` to change the defaults, and `--report` for a JSON audit.
 
 Repair an older output with current converter rules:
 

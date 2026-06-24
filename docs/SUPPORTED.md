@@ -25,6 +25,10 @@ still do unusual things and future discs may expose new compatibility fixes.
 - Full-disc BD-J menu preservation.
 - Extras, galleries, and BD-J interactive content.
 - Audio and subtitle passthrough.
+- Optional compact AC-3 mono/stereo for reencoded, copied, and already-HEVC
+  clips.
+- In-place compact-audio repair for existing converted backups without the
+  original source backup.
 - AVC/H.264 video to HEVC/H.265.
 - MPEG-2 sources with codec-aware bitrate planning.
 - Compact CQ conversions, including anime TV sets and high-bitrate movie discs,

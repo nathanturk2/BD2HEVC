@@ -104,6 +104,55 @@ def short_repeated_playitem_clips(disc_root: Path, clip_ids: set[str]) -> dict[s
 
 
 def patch_clpi_for_hevc(path: Path, *, patch_version_headers: bool = False) -> dict[str, Any]:
+    return patch_clpi_for_output(path, patch_video_to_hevc=True, patch_version_headers=patch_version_headers)
+
+
+BLURAY_AUDIO_CODING_TYPES = {0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0xA1, 0xA2}
+
+
+def patch_clpi_audio_descriptors(data: bytearray) -> int:
+    try:
+        offsets = clpi_offsets(data)
+    except ToolError:
+        return 0
+    pos = offsets["program_info"]
+    end = offsets["cpi"]
+    if not (0 <= pos + 6 <= end <= len(data)):
+        return 0
+    section_length = read_be32(data, pos)
+    end = min(end, pos + 4 + section_length)
+    pos += 4
+    if pos + 2 > end:
+        return 0
+    program_count = data[pos + 1]
+    pos += 2
+    patches = 0
+    for _ in range(program_count):
+        if pos + 8 > end:
+            break
+        stream_count = data[pos + 6]
+        pos += 8
+        for _ in range(stream_count):
+            if pos + 3 > end:
+                return patches
+            coding_info_length = data[pos + 2]
+            coding_type_pos = pos + 3
+            item_end = coding_type_pos + coding_info_length
+            if coding_info_length > 0 and item_end <= end and data[coding_type_pos] in BLURAY_AUDIO_CODING_TYPES:
+                if data[coding_type_pos] != 0x81:
+                    data[coding_type_pos] = 0x81
+                    patches += 1
+            pos = item_end
+    return patches
+
+
+def patch_clpi_for_output(
+    path: Path,
+    *,
+    patch_video_to_hevc: bool,
+    compact_audio: bool = False,
+    patch_version_headers: bool = False,
+) -> dict[str, Any]:
     if not path.exists():
         return {"file": str(path), "exists": False, "patched": False}
     data = bytearray(path.read_bytes())
@@ -112,8 +161,8 @@ def patch_clpi_for_hevc(path: Path, *, patch_version_headers: bool = False) -> d
     if patch_version_headers and data.startswith(b"HDMV0200"):
         data[4:8] = b"0300"
         version_changed = True
-    stream_patches = 0
-    stream_patches += patch_clpi_primary_video_descriptors(data)
+    stream_patches = patch_clpi_primary_video_descriptors(data) if patch_video_to_hevc else 0
+    audio_patches = patch_clpi_audio_descriptors(data) if compact_audio else 0
     if data != original:
         path.write_bytes(data)
     return {
@@ -122,6 +171,7 @@ def patch_clpi_for_hevc(path: Path, *, patch_version_headers: bool = False) -> d
         "patched": data != original,
         "version_changed": version_changed,
         "primary_video_patches": stream_patches,
+        "compact_audio_patches": audio_patches,
     }
 
 
@@ -587,13 +637,44 @@ def refresh_clpi_cpi_from_m2ts(output_clip: Path, output_clpi: Path, tools: dict
     }
 
 
-def patch_mpls_for_hevc(path: Path, clip_ids: set[str], *, patch_version_headers: bool = False) -> dict[str, Any]:
+def patch_mpls_audio_descriptors(data: bytearray, start: int, end: int) -> int:
+    patches = 0
+    pos = start
+    while pos + 3 <= end:
+        stream_entry_length = data[pos]
+        coding_length_pos = pos + 1 + stream_entry_length
+        if (
+            stream_entry_length >= 3
+            and coding_length_pos + 2 <= end
+            and data[pos + 1] in {1, 2, 3, 4}
+            and data[coding_length_pos] > 0
+            and data[coding_length_pos + 1] in BLURAY_AUDIO_CODING_TYPES
+        ):
+            if data[coding_length_pos + 1] != 0x81:
+                data[coding_length_pos + 1] = 0x81
+                patches += 1
+            pos = coding_length_pos + 1 + data[coding_length_pos]
+            continue
+        pos += 1
+    return patches
+
+
+def patch_mpls_for_hevc(
+    path: Path,
+    clip_ids: set[str],
+    *,
+    compact_audio_clip_ids: set[str] | None = None,
+    patch_version_headers: bool = False,
+) -> dict[str, Any]:
     if not path.exists():
         return {"file": str(path), "exists": False, "patched": False}
     data = bytearray(path.read_bytes())
     original = bytes(data)
     matched_clips: list[str] = []
+    compact_audio_matched_clips: list[str] = []
     stream_patches = 0
+    audio_patches = 0
+    compact_audio_clip_ids = compact_audio_clip_ids or set()
     if data.startswith(b"MPLS") and len(data) >= 20:
         playlist_start = read_be32(data, 8)
         if 0 <= playlist_start + 10 <= len(data):
@@ -611,6 +692,9 @@ def patch_mpls_for_hevc(path: Path, clip_ids: set[str], *, patch_version_headers
                     matched_clips.append(clip_id)
                     for source_pattern in (MPLS_PRIMARY_VIDEO_AVC, MPLS_PRIMARY_VIDEO_MPEG2):
                         stream_patches += replace_in_range(data, pos, item_end, source_pattern, MPLS_PRIMARY_VIDEO_HEVC)
+                if clip_id in compact_audio_clip_ids:
+                    compact_audio_matched_clips.append(clip_id)
+                    audio_patches += patch_mpls_audio_descriptors(data, pos, item_end)
                 pos = item_end
     if patch_version_headers and stream_patches and data.startswith(b"MPLS0200"):
         data[4:8] = b"0300"
@@ -621,7 +705,9 @@ def patch_mpls_for_hevc(path: Path, clip_ids: set[str], *, patch_version_headers
         "exists": True,
         "patched": data != original,
         "matched_clips": sorted(set(matched_clips)),
+        "compact_audio_matched_clips": sorted(set(compact_audio_matched_clips)),
         "primary_video_patches": stream_patches,
+        "compact_audio_patches": audio_patches,
         "version_changed": original[:8] == b"MPLS0200" and data[:8] == b"MPLS0300",
     }
 
@@ -632,22 +718,26 @@ def patch_navigation_for_hevc(
     *,
     tools: dict[str, Any] | None = None,
     source_root: Path | None = None,
+    compact_audio_clip_files: list[str] | None = None,
     refresh_cpi: bool = False,
     patch_version_headers: bool = False,
     verbose: bool = False,
 ) -> dict[str, Any]:
     clip_ids = {Path(name).stem for name in clip_files}
+    compact_audio_ids = {Path(name).stem for name in (compact_audio_clip_files or [])}
+    patched_clip_ids = clip_ids | compact_audio_ids
     bdmv = disc_root / "BDMV"
     actual_spn_candidates = short_repeated_playitem_clips(disc_root, clip_ids)
     report: dict[str, Any] = {
         "clips": sorted(clip_ids),
+        "compact_audio_clips": sorted(compact_audio_ids),
         "clpi": [],
         "mpls": [],
         "actual_keyframe_spn_candidates": actual_spn_candidates,
     }
     for rel in (Path("CLIPINF"), Path("BACKUP") / "CLIPINF"):
         folder = bdmv / rel
-        for clip_id in sorted(clip_ids):
+        for clip_id in sorted(patched_clip_ids):
             clpi_path = folder / f"{clip_id}.clpi"
             if source_root:
                 source_clip = source_root / "BDMV" / "STREAM" / f"{clip_id}.m2ts"
@@ -659,9 +749,16 @@ def patch_navigation_for_hevc(
                     patch_version_headers=patch_version_headers,
                     tools=tools,
                     prefer_actual_keyframe_spns=clip_id in actual_spn_candidates,
+                    patch_video_to_hevc=clip_id in clip_ids,
+                    compact_audio=clip_id in compact_audio_ids,
                 )
             else:
-                item = patch_clpi_for_hevc(clpi_path, patch_version_headers=patch_version_headers)
+                item = patch_clpi_for_output(
+                    clpi_path,
+                    patch_video_to_hevc=clip_id in clip_ids,
+                    compact_audio=clip_id in compact_audio_ids,
+                    patch_version_headers=patch_version_headers,
+                )
             if refresh_cpi and tools and clpi_path.exists():
                 stream_path = bdmv / "STREAM" / f"{clip_id}.m2ts"
                 try:
@@ -674,8 +771,13 @@ def patch_navigation_for_hevc(
         if not folder.is_dir():
             continue
         for playlist in sorted(folder.glob("*.mpls")):
-            result = patch_mpls_for_hevc(playlist, clip_ids, patch_version_headers=patch_version_headers)
-            if result.get("matched_clips") or result.get("patched"):
+            result = patch_mpls_for_hevc(
+                playlist,
+                clip_ids,
+                compact_audio_clip_ids=compact_audio_ids,
+                patch_version_headers=patch_version_headers,
+            )
+            if result.get("matched_clips") or result.get("compact_audio_matched_clips") or result.get("patched"):
                 report["mpls"].append(result)
     report["patched_clpi_count"] = sum(1 for item in report["clpi"] if item.get("patched") or (item.get("patch") or {}).get("patched"))
     report["scaled_clpi_cpi_count"] = sum(1 for item in report["clpi"] if ((item.get("cpi_scale") or {}).get("scaled")))
@@ -683,6 +785,10 @@ def patch_navigation_for_hevc(
     report["primary_video_descriptor_patches"] = (
         sum(int(item.get("primary_video_patches") or (item.get("patch") or {}).get("primary_video_patches") or 0) for item in report["clpi"])
         + sum(int(item.get("primary_video_patches") or 0) for item in report["mpls"])
+    )
+    report["compact_audio_descriptor_patches"] = (
+        sum(int(item.get("compact_audio_patches") or (item.get("patch") or {}).get("compact_audio_patches") or 0) for item in report["clpi"])
+        + sum(int(item.get("compact_audio_patches") or 0) for item in report["mpls"])
     )
     return report
 
@@ -698,13 +804,20 @@ def restore_source_clpi(
     patch_version_headers: bool = False,
     tools: dict[str, Any] | None = None,
     prefer_actual_keyframe_spns: bool = False,
+    patch_video_to_hevc: bool = True,
+    compact_audio: bool = False,
 ) -> dict[str, Any]:
     source_clpi = source_clpi_for_stream(source_clip)
     if not source_clpi.exists():
         return {"source_clpi": str(source_clpi), "output_clpi": str(output_clpi), "restored": False, "missing": True}
     output_clpi.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_clpi, output_clpi)
-    patch_result = patch_clpi_for_hevc(output_clpi, patch_version_headers=patch_version_headers)
+    patch_result = patch_clpi_for_output(
+        output_clpi,
+        patch_video_to_hevc=patch_video_to_hevc,
+        compact_audio=compact_audio,
+        patch_version_headers=patch_version_headers,
+    )
     cpi_scale = None
     if output_clip:
         try:

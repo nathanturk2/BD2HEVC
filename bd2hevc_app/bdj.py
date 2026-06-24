@@ -730,6 +730,13 @@ def patch_music_jukebox_button_queues_state(data: bytes) -> tuple[bytes, dict[st
         + b"\xb4" + playlist_menu_field.to_bytes(2, "big")
         + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
     )
+    popup_menu_addition = (
+        b"\x2b\xc1" + be_class.to_bytes(2, "big")
+        + b"\x99\x00\x10"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + jukebox_menu_field.to_bytes(2, "big")
+        + b"\xb9" + add_menu_method.to_bytes(2, "big") + b"\x02\x00"
+    )
     focused_menu_additions = (
         b"\x2b\xc1" + be_class.to_bytes(2, "big")
         + b"\x99\x00\x2d"
@@ -744,29 +751,42 @@ def patch_music_jukebox_button_queues_state(data: bytes) -> tuple[bytes, dict[st
         + b"\xb6" + default_button_method.to_bytes(2, "big")
         + b"\xb9" + focus_button_method.to_bytes(2, "big") + b"\x02\x00"
     )
+    state_change = (
+        b"\x2c\x2a\xb4" + state_field.to_bytes(2, "big")
+        + b"\x01\xb9" + queued_change_method.to_bytes(2, "big") + b"\x03\x00"
+    )
+    focus_after_state_change = (
+        b"\x2b\xc1" + be_class.to_bytes(2, "big")
+        + b"\x99\x00\x13"
+        + b"\x2c\x2b\xc0" + be_class.to_bytes(2, "big")
+        + b"\xb4" + playlist_menu_field.to_bytes(2, "big")
+        + b"\xb6" + default_button_method.to_bytes(2, "big")
+        + b"\xb9" + focus_button_method.to_bytes(2, "big") + b"\x02\x00"
+        + b"\xb1"
+    )
     queued_state_change = (
         menu_additions
-        + b"\x2c\x2a\xb4" + state_field.to_bytes(2, "big")
-        + b"\x01\xb9" + queued_change_method.to_bytes(2, "big") + b"\x03\x00"
+        + state_change
         + b"\xb1"
     )
     focused_queued_state_change = (
         focused_menu_additions
-        + b"\x2c\x2a\xb4" + state_field.to_bytes(2, "big")
-        + b"\x01\xb9" + queued_change_method.to_bytes(2, "big") + b"\x03\x00"
+        + state_change
         + b"\xb1"
     )
+    queued_state_then_focus_change = menu_additions + state_change + focus_after_state_change
+    popup_queued_state_then_focus_change = popup_menu_addition + state_change + focus_after_state_change
     cleanup = (
         b"\x2c\xb9" + close_menu_method.to_bytes(2, "big") + b"\x01\x00"
         + b"\x2c\xb9" + show_menu_method.to_bytes(2, "big") + b"\x01\x00"
     )
-    label = "close previous menu stack and queue music jukebox state after menu additions"
+    label = "close previous menu stack, queue music jukebox popup/group state, then focus default track"
     updated, report = replace_in_method_code_resized(
         patched,
         method_name="a",
         descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
         old=old,
-        new=cleanup + focused_queued_state_change,
+        new=cleanup + queued_state_then_focus_change,
         label=label,
         expected_matches=1,
     )
@@ -777,19 +797,51 @@ def patch_music_jukebox_button_queues_state(data: bytes) -> tuple[bytes, dict[st
         method_name="a",
         descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
         old=cleanup + queued_state_change,
-        new=cleanup + focused_queued_state_change,
+        new=cleanup + queued_state_then_focus_change,
         label=label,
         expected_matches=1,
     )
     if focused_upgrade_report.get("matches") or focused_upgrade_report.get("already_patched") or focused_upgrade_report.get("error"):
         focused_upgrade_report["upgraded_previous_patch"] = bool(focused_upgrade_report.get("matches"))
         return updated, focused_upgrade_report
+    updated, post_state_focus_upgrade_report = replace_in_method_code_resized(
+        patched,
+        method_name="a",
+        descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
+        old=cleanup + focused_queued_state_change,
+        new=cleanup + queued_state_then_focus_change,
+        label=label,
+        expected_matches=1,
+    )
+    if (
+        post_state_focus_upgrade_report.get("matches")
+        or post_state_focus_upgrade_report.get("already_patched")
+        or post_state_focus_upgrade_report.get("error")
+    ):
+        post_state_focus_upgrade_report["upgraded_previous_patch"] = bool(post_state_focus_upgrade_report.get("matches"))
+        return updated, post_state_focus_upgrade_report
+    updated, popup_only_upgrade_report = replace_in_method_code_resized(
+        patched,
+        method_name="a",
+        descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
+        old=cleanup + popup_queued_state_then_focus_change,
+        new=cleanup + queued_state_then_focus_change,
+        label=label,
+        expected_matches=1,
+    )
+    if (
+        popup_only_upgrade_report.get("matches")
+        or popup_only_upgrade_report.get("already_patched")
+        or popup_only_upgrade_report.get("error")
+    ):
+        popup_only_upgrade_report["upgraded_previous_patch"] = bool(popup_only_upgrade_report.get("matches"))
+        return updated, popup_only_upgrade_report
     updated, upgrade_report = replace_in_method_code_resized(
         patched,
         method_name="a",
         descriptor="(Lcom/wb/bdj/menu/l;Lcom/wb/bdj/menu/am;)V",
         old=queued_state_change,
-        new=cleanup + focused_queued_state_change,
+        new=cleanup + queued_state_then_focus_change,
         label=label,
         expected_matches=1,
     )
@@ -859,6 +911,142 @@ def patch_music_jukebox_state_restores_default_focus(data: bytes) -> tuple[bytes
         old=old,
         new=new,
         label="restore music jukebox default focus before key handling",
+        expected_matches=1,
+    )
+
+
+def patch_music_jukebox_button_attaches_playlist_group(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    entries, _ = parse_constant_pool(data)
+    jukebox_menu_field = find_cp_fieldref(entries, "com/wb/bdj/menu/be", "y", "Lcom/wb/bdj/menu/k;")
+    playlist_menu_field = find_cp_fieldref(entries, "com/wb/bdj/menu/be", "z", "Lcom/wb/bdj/menu/k;")
+    if not (jukebox_menu_field and playlist_menu_field):
+        return data, {
+            "label": "attach music jukebox playlist group to popup instance",
+            "matches": 0,
+            "already_patched": False,
+            "error": "required Warner music jukebox menu fields were not found",
+        }
+    patched, children_method = add_cp_methodref(data, "com/wb/bdj/menu/k", "p", "()Ljava/util/ArrayList;")
+    patched, add_child_method = add_cp_methodref(patched, "java/util/ArrayList", "add", "(Ljava/lang/Object;)Z")
+    patched, set_parent_method = add_cp_methodref(patched, "com/wb/bdj/menu/l", "a", "(Lcom/wb/bdj/menu/k;)V")
+    entries, _ = parse_constant_pool(patched)
+    jukebox_menu_field = find_cp_fieldref(entries, "com/wb/bdj/menu/be", "y", "Lcom/wb/bdj/menu/k;")
+    playlist_menu_field = find_cp_fieldref(entries, "com/wb/bdj/menu/be", "z", "Lcom/wb/bdj/menu/k;")
+    children_method = find_cp_methodref(entries, "com/wb/bdj/menu/k", "p", "()Ljava/util/ArrayList;")
+    add_child_method = find_cp_methodref(entries, "java/util/ArrayList", "add", "(Ljava/lang/Object;)Z")
+    set_parent_method = find_cp_methodref(entries, "com/wb/bdj/menu/l", "a", "(Lcom/wb/bdj/menu/k;)V")
+    if not (jukebox_menu_field and playlist_menu_field and children_method and add_child_method and set_parent_method):
+        return data, {
+            "label": "attach music jukebox playlist group to popup instance",
+            "matches": 0,
+            "already_patched": False,
+            "error": "could not add required Warner music jukebox group-parent references",
+        }
+    old = b"\xb5" + playlist_menu_field.to_bytes(2, "big") + b"\xb1"
+    new = (
+        b"\xb5" + playlist_menu_field.to_bytes(2, "big")
+        + b"\x2a\xb4" + jukebox_menu_field.to_bytes(2, "big")
+        + b"\xb6" + children_method.to_bytes(2, "big")
+        + b"\x2a\xb4" + playlist_menu_field.to_bytes(2, "big")
+        + b"\xb6" + add_child_method.to_bytes(2, "big")
+        + b"\x57"
+        + b"\x2a\xb4" + playlist_menu_field.to_bytes(2, "big")
+        + b"\x2a\xb4" + jukebox_menu_field.to_bytes(2, "big")
+        + b"\xb6" + set_parent_method.to_bytes(2, "big")
+        + b"\xb1"
+    )
+    return replace_in_method_code_resized(
+        patched,
+        method_name="<init>",
+        descriptor="(Ljava/lang/String;Lcom/wb/bdj/menu/k;Ljava/util/Properties;Lcom/wb/bdj/menu/bm;)V",
+        old=old,
+        new=new,
+        label="attach music jukebox playlist group to popup instance",
+        expected_matches=1,
+    )
+
+
+def patch_music_jukebox_state_stops_after_start_select(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    entries, _ = parse_constant_pool(data)
+    player_field = find_cp_fieldref(entries, "com/wb/bdj/controller/x", "g", "Ljavax/media/Player;")
+    prefetch_method = find_cp_interface_methodref(entries, "javax/media/Controller", "prefetch", "()V")
+    if not player_field:
+        return data, {
+            "label": "stop music jukebox startup playlist after selecting it",
+            "matches": 0,
+            "already_patched": False,
+            "error": "required Warner music jukebox player reference was not found",
+        }
+    patched, stop_method = add_cp_interface_methodref(data, "javax/media/Clock", "stop", "()V")
+    entries, _ = parse_constant_pool(patched)
+    player_field = find_cp_fieldref(entries, "com/wb/bdj/controller/x", "g", "Ljavax/media/Player;")
+    prefetch_method = find_cp_interface_methodref(entries, "javax/media/Controller", "prefetch", "()V")
+    stop_method = find_cp_interface_methodref(entries, "javax/media/Clock", "stop", "()V")
+    if not (player_field and stop_method):
+        return data, {
+            "label": "stop music jukebox startup playlist after selecting it",
+            "matches": 0,
+            "already_patched": False,
+            "error": "could not add required Warner music jukebox stop reference",
+        }
+    new = (
+        b"\x2d\xb4" + player_field.to_bytes(2, "big")
+        + b"\xb9" + stop_method.to_bytes(2, "big") + b"\x01\x00"
+    )
+    label = "stop music jukebox startup playlist after selecting it"
+    if prefetch_method:
+        old = (
+            b"\x2d\xb4" + player_field.to_bytes(2, "big")
+            + b"\xb9" + prefetch_method.to_bytes(2, "big") + b"\x01\x00"
+        )
+        updated, report = replace_in_method_code_resized(
+            patched,
+            method_name="a",
+            descriptor="(Lcom/wb/bdj/controller/q;)V",
+            old=old,
+            new=new,
+            label=label,
+            expected_matches=1,
+        )
+        if report.get("matches") or report.get("already_patched") or report.get("error"):
+            return updated, report
+    old_nops = b"\x00" * len(new)
+    updated, report = replace_in_method_code_resized(
+        patched,
+        method_name="a",
+        descriptor="(Lcom/wb/bdj/controller/q;)V",
+        old=old_nops,
+        new=new,
+        label=label,
+        expected_matches=1,
+    )
+    if report.get("matches") or report.get("already_patched") or report.get("error"):
+        report["upgraded_previous_patch"] = bool(report.get("matches"))
+    return updated, report
+
+
+def patch_music_jukebox_state_skips_start_prefetch(data: bytes) -> tuple[bytes, dict[str, Any]]:
+    entries, _ = parse_constant_pool(data)
+    player_field = find_cp_fieldref(entries, "com/wb/bdj/controller/x", "g", "Ljavax/media/Player;")
+    prefetch_method = find_cp_interface_methodref(entries, "javax/media/Controller", "prefetch", "()V")
+    if not (player_field and prefetch_method):
+        return data, {
+            "label": "skip music jukebox startup prefetch",
+            "matches": 0,
+            "already_patched": False,
+            "error": "required Warner music jukebox prefetch references were not found",
+        }
+    old = (
+        b"\x2d\xb4" + player_field.to_bytes(2, "big")
+        + b"\xb9" + prefetch_method.to_bytes(2, "big") + b"\x01\x00"
+    )
+    return replace_in_method_code_resized(
+        data,
+        method_name="a",
+        descriptor="(Lcom/wb/bdj/controller/q;)V",
+        old=old,
+        new=b"\x00" * len(old),
+        label="skip music jukebox startup prefetch",
         expected_matches=1,
     )
 
@@ -1230,6 +1418,22 @@ def patch_bluray_vlc_menu_jar(jar_path: Path, *, fixes: list[str], backup: bool 
                 if "music-jukebox-queued-state" in fixes:
                     data, jukebox_patch = patch_music_jukebox_button_queues_state(data)
                     entry_report["patches"].append(jukebox_patch)
+                entry_report["patched"] = any(p.get("matches") == 1 for p in entry_report["patches"])
+                entry_report["already_patched"] = any(p.get("already_patched") for p in entry_report["patches"])
+                entry_report["ok"] = all("error" not in p for p in entry_report["patches"]) and (
+                    not entry_report["patches"] or entry_report["patched"] or entry_report["already_patched"]
+                )
+                report["entries"].append(entry_report)
+                if not entry_report["ok"]:
+                    temp_path.unlink(missing_ok=True)
+                    raise ToolError(f"Could not safely patch {jar_path}: {entry_report}")
+                report["patched"] = report["patched"] or entry_report["patched"]
+                report["already_patched"] = report["already_patched"] or entry_report["already_patched"]
+            if info.filename == "com/wb/bdj/menu/be.class":
+                entry_report = {"entry": info.filename, "patches": []}
+                if "music-jukebox-queued-state" in fixes:
+                    data, group_patch = patch_music_jukebox_button_attaches_playlist_group(data)
+                    entry_report["patches"].append(group_patch)
                 entry_report["patched"] = any(p.get("matches") == 1 for p in entry_report["patches"])
                 entry_report["already_patched"] = any(p.get("already_patched") for p in entry_report["patches"])
                 entry_report["ok"] = all("error" not in p for p in entry_report["patches"]) and (

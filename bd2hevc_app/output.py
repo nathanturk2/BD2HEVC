@@ -157,6 +157,9 @@ def print_conversion_summary(
             if len(clips) > 8:
                 preview += f", ... +{len(clips) - 8} more"
             print(f"First clips: {preview}")
+        audio_remux = result.get("compact_audio_remux_clips") or []
+        if audio_remux:
+            print(f"Audio-only compact-stereo remuxes: {len(audio_remux)}")
         disc_fit = result.get("target_disc_fit") or {}
         if disc_fit:
             fit_text = "scaled to fit" if disc_fit.get("scaled") else "already fits"
@@ -178,6 +181,9 @@ def print_conversion_summary(
         validation = result.get("validation") or []
         failed = [Path(v.get("output", "")).name for v in validation if not v.get("ok")]
         print(f"Reencoded clips: {len(reencoded)}")
+        compact_audio_remuxed = result.get("compact_audio_remuxed") or []
+        if compact_audio_remuxed:
+            print(f"Audio-only compact-stereo remuxes: {len(compact_audio_remuxed)}")
         print("Clip validation: " + ("passed" if not failed else f"failed ({', '.join(failed[:8])})"))
         disc_fit = result.get("target_disc_fit") or {}
         if disc_fit:

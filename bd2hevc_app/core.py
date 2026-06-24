@@ -72,16 +72,19 @@ from .config import (
     VERSION,
 )
 from .diagnostics import DEFAULT_DIAGNOSTIC_LOG_LINES, cmd_diagnose
-from .encoding import encode_to_hevc_m2ts, transcode_compact_audio_tracks
+from .encoding import compact_audio_source_streams, encode_to_hevc_m2ts, transcode_compact_audio_tracks
 from .libbluray_record import create_libbluray_recording, isolated_bdj_storage_env, libbluray_debug_env
 from .muxing import (
     author_m2ts_split,
     author_uhdbd_split,
+    parse_tsmuxer_tracks,
     write_tsmuxer_meta,
 )
 from .navigation import (
+    patch_clpi_for_output,
     patch_navigation_for_hevc,
     restore_source_clpi,
+    scale_clpi_cpi_map_to_stream,
 )
 from .output import (
     conversion_succeeded,
@@ -133,6 +136,7 @@ from .scan import (
     ffprobe_streams,
     find_disc_roots,
     inspect_clip,
+    refine_disc_video_bitrates,
     run_makemkv_scan,
     scan_disc,
     summarize_disc,
@@ -977,6 +981,61 @@ def apply_quality_overrides(
     return report if any(value is not None for value in report.values()) else None
 
 
+def source_bitrate_files_for_effective_plan(
+    clips: list[dict[str, Any]],
+    bitrate_options: dict[str, Any],
+    args: argparse.Namespace,
+) -> set[str]:
+    preview = copy.deepcopy(clips)
+    remember_original_clip_actions(preview)
+    apply_quality_overrides(preview, bitrate_options, args)
+    apply_clip_copy_overrides(preview, getattr(args, "copy_clips", None))
+    return {
+        str(clip.get("file") or "")
+        for clip in preview
+        if clip.get("action") == "reencode"
+        and (clip.get("video") or {}).get("target_hevc", {}).get("rate_control") != "cq"
+    }
+
+
+def scan_clone_source_for_plan(
+    source: Path,
+    tools: dict[str, Any],
+    args: argparse.Namespace,
+    bitrate_options: dict[str, Any],
+) -> dict[str, Any]:
+    accurate_requested = not getattr(args, "fast_bitrate", False)
+    scan = scan_disc(
+        source,
+        tools,
+        accurate_video_bitrate=False,
+        depad_video_padding=depad_video_padding_from_args(args),
+        bitrate_options=bitrate_options,
+        use_makemkv=use_makemkv_from_args(args),
+        verbose=args.verbose,
+    )
+    bitrate_files = source_bitrate_files_for_effective_plan(scan.get("clips", []), bitrate_options, args) if accurate_requested else set()
+    if bitrate_files:
+        refine_disc_video_bitrates(
+            scan,
+            tools,
+            bitrate_files,
+            depad_video_padding=depad_video_padding_from_args(args),
+            bitrate_options=bitrate_options,
+        )
+    scan["planning"] = {
+        "strategy": "metadata-then-selective-bitrate",
+        "accurate_bitrate_requested": accurate_requested,
+        "accurate_bitrate_clips": scan.get("accurate_bitrate_clips", []),
+        "accurate_bitrate_skipped_clips": sorted(
+            str(clip.get("file") or "")
+            for clip in scan.get("clips", [])
+            if clip.get("action") == "reencode" and str(clip.get("file") or "") not in bitrate_files
+        ),
+    }
+    return scan
+
+
 def extract_title_with_makemkv(source: Path, title_id: int, destination: Path, tools: dict[str, Any], *, dry_run: bool, verbose: bool) -> Path:
     exe = tools.get("makemkvcon64") or tools.get("makemkvcon")
     if not exe:
@@ -1148,10 +1207,12 @@ def clone_streams_plan_payload(
     top_n_cq_override: dict[str, Any] | None,
     clips: list[dict[str, Any]],
     *,
+    compact_audio_remux_clips: list[dict[str, Any]] | None = None,
     quality_overrides: dict[str, Any] | None = None,
     copy_clip_overrides: dict[str, Any] | None = None,
     postprocess: dict[str, Any] | None = None,
     target_disc_fit: dict[str, Any] | None = None,
+    planning: dict[str, Any] | None = None,
     planning_pending: bool = False,
 ) -> dict[str, Any]:
     return {
@@ -1178,6 +1239,7 @@ def clone_streams_plan_payload(
             "note": "Library planning subtracts safe AVC/HEVC filler and VC-1 stuffing from accurate source video bitrate. --keep-source-padding and --uhd-profile disc keep the padded-source estimate.",
         },
         "target_disc_fit": target_disc_fit,
+        "planning": planning,
         "uhd_profile": normalize_uhd_profile(getattr(args, "uhd_profile", "library")),
         "uhd_structure": "always",
         "patch_navigation": args.patch_navigation,
@@ -1189,6 +1251,7 @@ def clone_streams_plan_payload(
         "encode_ahead_depth": getattr(args, "encode_ahead_depth", 3),
         "planning_pending": planning_pending,
         "reencode_clips": [clip_summary(c) for c in clips],
+        "compact_audio_remux_clips": [clip_summary(c) for c in (compact_audio_remux_clips or [])],
     }
 
 
@@ -1258,6 +1321,8 @@ def mux_validate_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], 
         ctx["output_clpi"],
         output_clip=ctx["output_path"],
         patch_version_headers=patch_version_headers_from_args(args),
+        tools=tools,
+        compact_audio=compact_audio,
     )
     if clpi_report.get("restored") and ctx["output_clpi"].exists():
         ctx["backup_clpi"].parent.mkdir(parents=True, exist_ok=True)
@@ -1281,6 +1346,205 @@ def finalize_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args
     if audio_mode_from_args(args) == "compact-stereo":
         transcode_compact_audio_context(ctx, tools, args)
     return mux_validate_clone_clip_context(ctx, tools, args)
+
+
+def clip_needs_compact_audio_remux(clip: dict[str, Any]) -> bool:
+    return clip.get("action") != "reencode" and bool(clip.get("video")) and bool(compact_audio_source_streams(clip))
+
+
+def compact_audio_stream_matches_target(
+    audio: dict[str, Any],
+    *,
+    stereo_audio_bitrate: int,
+    mono_audio_bitrate: int,
+) -> bool:
+    channels = safe_int(audio.get("channels")) or 0
+    expected_channels = 1 if channels == 1 else 2
+    expected_bitrate = mono_audio_bitrate if expected_channels == 1 else stereo_audio_bitrate
+    bitrate = safe_int(audio.get("bit_rate"))
+    return (
+        audio.get("codec_name") == "ac3"
+        and channels == expected_channels
+        and (bitrate is None or bitrate == expected_bitrate)
+    )
+
+
+def compact_audio_repair_reasons(
+    clip: dict[str, Any],
+    *,
+    stereo_audio_bitrate: int,
+    mono_audio_bitrate: int,
+) -> list[str]:
+    if not clip.get("video"):
+        return []
+    reasons: list[str] = []
+    for index, audio in enumerate(compact_audio_source_streams(clip)):
+        if compact_audio_stream_matches_target(
+            audio,
+            stereo_audio_bitrate=stereo_audio_bitrate,
+            mono_audio_bitrate=mono_audio_bitrate,
+        ):
+            continue
+        codec = audio.get("codec_name") or "unknown"
+        channels = safe_int(audio.get("channels")) or 0
+        bitrate = safe_int(audio.get("bit_rate"))
+        detail = f"audio {index + 1}: {codec}, {channels} channel(s)"
+        if bitrate:
+            detail += f", {bitrate} bps"
+        reasons.append(detail)
+    return reasons
+
+
+def remux_compact_audio_copy_context(ctx: dict[str, Any], tools: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    tracks = parse_tsmuxer_tracks(ctx["input_path"], tools, verbose=args.verbose)
+    video_track = next((track for track in tracks if str(track.get("stream_id") or "").startswith("V_")), None)
+    if not video_track:
+        raise ToolError(f"tsMuxeR did not expose a video track for {ctx['input_path']}")
+    temp_output = ctx["output_path"].with_name(f"{ctx['output_path'].stem}.compact-remux.tmp.m2ts")
+    original_temp = ctx["output_path"].with_name(f"{ctx['output_path'].stem}.precompact.tmp.m2ts")
+    in_place = ctx["input_path"].resolve() == ctx["output_path"].resolve()
+    meta_path = temp_output.with_suffix(".meta")
+    audio_tracks: list[dict[str, Any]] = []
+    in_place_committed = False
+    temp_output.unlink(missing_ok=True)
+    if in_place:
+        original_temp.unlink(missing_ok=True)
+    try:
+        audio_tracks, _audio_cmd = transcode_compact_audio_tracks(
+            ctx["input_path"],
+            ctx["temp_audio_prefix"],
+            ctx["clip"],
+            tools,
+            stereo_audio_bitrate=stereo_audio_bitrate_from_args(args),
+            mono_audio_bitrate=mono_audio_bitrate_from_args(args),
+            dry_run=False,
+            verbose=args.verbose,
+        )
+        author_m2ts_split(
+            ctx["input_path"],
+            ctx["input_path"],
+            temp_output,
+            ctx["clip"],
+            tools,
+            video_track_id=video_track.get("track"),
+            video_stream_id=str(video_track.get("stream_id") or ""),
+            compact_audio_tracks=audio_tracks,
+            reference_clip_info=ctx["clip"],
+            verbose=args.verbose,
+        )
+        validation = validate_clip(
+            ctx["input_path"],
+            temp_output,
+            tools,
+            decode_seconds=args.decode_sample,
+            require_hevc="never",
+            audio_mode="compact-stereo",
+        )
+        source_codec = (ctx["clip"].get("video") or {}).get("codec_name")
+        output_probe = validation.get("output_probe") or {}
+        output_codec = (output_probe.get("video") or {}).get("codec_name")
+        validation["checks"].append(
+            {
+                "name": "video_codec_passthrough",
+                "ok": source_codec == output_codec,
+                "source": source_codec,
+                "output": output_codec,
+            }
+        )
+        source_subtitles = [subtitle.get("codec_name") for subtitle in ctx["clip"].get("subtitles", [])]
+        output_subtitles = [subtitle.get("codec_name") for subtitle in output_probe.get("subtitles", [])]
+        validation["checks"].append(
+            {
+                "name": "subtitle_codecs_passthrough",
+                "ok": source_subtitles == output_subtitles,
+                "source": source_subtitles,
+                "output": output_subtitles,
+            }
+        )
+        source_duration = safe_float(ctx["clip"].get("duration"))
+        output_duration = safe_float(output_probe.get("duration"))
+        if source_duration is not None and output_duration is not None:
+            duration_tolerance = max(0.5, min(2.0, source_duration * 0.005))
+            validation["checks"].append(
+                {
+                    "name": "audio_remux_duration_matches_source",
+                    "ok": abs(source_duration - output_duration) <= duration_tolerance,
+                    "source_duration": source_duration,
+                    "output_duration": output_duration,
+                    "tolerance_seconds": duration_tolerance,
+                }
+            )
+        validation["ok"] = all(bool(check.get("ok")) for check in validation.get("checks", []))
+        if not validation["ok"]:
+            raise ToolError(f"Compact-audio remux validation failed for {ctx['file']}")
+        if in_place:
+            clpi_bytes = ctx["output_clpi"].read_bytes() if ctx["output_clpi"].exists() else None
+            backup_clpi_bytes = ctx["backup_clpi"].read_bytes() if ctx["backup_clpi"].exists() else None
+            ctx["input_path"].replace(original_temp)
+            try:
+                temp_output.replace(ctx["output_path"])
+                patch_report = patch_clpi_for_output(
+                    ctx["output_clpi"],
+                    patch_video_to_hevc=source_codec == "hevc",
+                    compact_audio=True,
+                    patch_version_headers=patch_version_headers_from_args(args),
+                )
+                cpi_scale = scale_clpi_cpi_map_to_stream(
+                    original_temp,
+                    ctx["output_path"],
+                    ctx["output_clpi"],
+                    tools=tools,
+                )
+                clpi_report = {
+                    "output_clpi": str(ctx["output_clpi"]),
+                    "restored": False,
+                    "patched_in_place": True,
+                    "patch": patch_report,
+                    "cpi_scale": cpi_scale,
+                }
+                if ctx["output_clpi"].exists():
+                    ctx["backup_clpi"].parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(ctx["output_clpi"], ctx["backup_clpi"])
+                in_place_committed = True
+            except Exception:
+                ctx["output_path"].unlink(missing_ok=True)
+                if original_temp.exists():
+                    original_temp.replace(ctx["output_path"])
+                if clpi_bytes is None:
+                    ctx["output_clpi"].unlink(missing_ok=True)
+                else:
+                    ctx["output_clpi"].write_bytes(clpi_bytes)
+                if backup_clpi_bytes is None:
+                    ctx["backup_clpi"].unlink(missing_ok=True)
+                else:
+                    ctx["backup_clpi"].parent.mkdir(parents=True, exist_ok=True)
+                    ctx["backup_clpi"].write_bytes(backup_clpi_bytes)
+                raise
+        else:
+            temp_output.replace(ctx["output_path"])
+            clpi_report = restore_source_clpi(
+                ctx["input_path"],
+                ctx["output_clpi"],
+                output_clip=ctx["output_path"],
+                patch_version_headers=patch_version_headers_from_args(args),
+                tools=tools,
+                patch_video_to_hevc=False,
+                compact_audio=True,
+            )
+        if clpi_report.get("restored") and ctx["output_clpi"].exists():
+            ctx["backup_clpi"].parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ctx["output_clpi"], ctx["backup_clpi"])
+        validation["output"] = str(ctx["output_path"])
+        validation["compact_audio_remux"] = True
+        validation["clpi"] = clpi_report
+        return validation
+    finally:
+        temp_output.unlink(missing_ok=True)
+        if in_place_committed:
+            original_temp.unlink(missing_ok=True)
+        meta_path.unlink(missing_ok=True)
+        for audio in audio_tracks:
+            Path(str(audio.get("path") or "")).unlink(missing_ok=True)
 
 
 def run_queued_encode_mux_pipeline(
@@ -1543,15 +1807,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
     bitrate_options = bitrate_options_for_args(args)
     if not args.dry_run:
         make_output_available(output, source, force=args.force)
-    scan = scan_disc(
-        source,
-        tools,
-        accurate_video_bitrate=not args.fast_bitrate,
-        depad_video_padding=depad_video_padding_from_args(args),
-        bitrate_options=bitrate_options,
-        use_makemkv=use_makemkv_from_args(args),
-        verbose=args.verbose,
-    )
+    scan = scan_clone_source_for_plan(source, tools, args, bitrate_options)
     remember_original_clip_actions(scan.get("clips", []))
     quality_overrides = apply_quality_overrides(scan.get("clips", []), bitrate_options, args)
     main_title_cq_override = (quality_overrides or {}).get("main_title_cq")
@@ -1566,6 +1822,11 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         audio_mode=audio_mode_from_args(args),
     )
     clips = [c for c in scan.get("clips", []) if c.get("action") == "reencode"]
+    compact_audio_remux_clips = (
+        [c for c in scan.get("clips", []) if clip_needs_compact_audio_remux(c)]
+        if audio_mode_from_args(args) == "compact-stereo"
+        else []
+    )
     progress_plan_path = path_or_none(getattr(args, "progress_plan", None))
     plan_payload = clone_streams_plan_payload(
         source,
@@ -1575,10 +1836,12 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         main_title_cq_override,
         top_n_cq_override,
         clips,
+        compact_audio_remux_clips=compact_audio_remux_clips,
         quality_overrides=quality_overrides,
         copy_clip_overrides=copy_clip_overrides,
         postprocess=postprocess,
         target_disc_fit=disc_fit,
+        planning=scan.get("planning"),
     )
     if progress_plan_path:
         progress_plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1636,6 +1899,13 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
                 stage="validated",
                 enabled=progress_enabled,
             )
+    compact_audio_remux_validations: list[dict[str, Any]] = []
+    for clip in compact_audio_remux_clips:
+        ctx = clone_clip_context(source, output, clip)
+        progress_event("audio-remux-start", ctx["file"])
+        compact_audio_remux_validations.append(remux_compact_audio_copy_context(ctx, tools, args))
+        progress_event("audio-remux-done", ctx["file"])
+    validations.extend(compact_audio_remux_validations)
     navigation_patch = None
     emit_conversion_progress(
         done_seconds,
@@ -1647,11 +1917,18 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         enabled=progress_enabled,
     )
     if args.patch_navigation:
+        compact_audio_clip_files = (
+            [clip["file"] for clip in clips if compact_audio_source_streams(clip)]
+            + [clip["file"] for clip in compact_audio_remux_clips]
+            if audio_mode_from_args(args) == "compact-stereo"
+            else []
+        )
         navigation_patch = patch_navigation_for_hevc(
             output,
             [clip["file"] for clip in clips],
             tools=tools,
             source_root=source,
+            compact_audio_clip_files=compact_audio_clip_files,
             patch_version_headers=patch_version_headers_from_args(args),
         )
     uhd_structure = ensure_uhd_backup_structure(output, patch_version_headers=patch_version_headers_from_args(args))
@@ -1690,6 +1967,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         },
         "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
         "target_disc_fit": disc_fit,
+        "planning": scan.get("planning"),
         "uhd_profile": normalize_uhd_profile(getattr(args, "uhd_profile", "library")),
         "uhd_structure": uhd_structure,
         "vlc_fixes": selected_vlc_fixes,
@@ -1699,6 +1977,7 @@ def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> di
         "preservation_copy": copy_report,
         "disc_metadata": disc_metadata,
         "reencoded": [c["file"] for c in clips],
+        "compact_audio_remuxed": [c["file"] for c in compact_audio_remux_clips],
         "validation": validations,
         "makemkv_validation": makemkv_validation,
     }
@@ -1981,7 +2260,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
         if not clip.exists():
             continue
         reference_clip = reference_stream_dir / clip.name if reference_stream_dir else None
-        results.append(validate_clip(reference_clip, clip, tools, decode_seconds=args.decode_sample, require_hevc=require_hevc))
+        results.append(
+            validate_clip(
+                reference_clip,
+                clip,
+                tools,
+                decode_seconds=args.decode_sample,
+                require_hevc=require_hevc,
+                audio_mode=getattr(args, "audio_mode", DEFAULT_AUDIO_MODE),
+            )
+        )
     payload: dict[str, Any] = {"source_backup": args.source_backup, "reference": args.reference, "clips": results}
     if makemkv_validation is not None:
         payload["makemkv_validation"] = makemkv_validation
@@ -2225,6 +2513,181 @@ def cmd_reencode_replacements(args: argparse.Namespace) -> int:
         "ok": all(item.get("ok") for item in reports),
     }
     print(json.dumps(payload, indent=2))
+    return 0 if payload["ok"] else 4
+
+
+def cmd_repair_compact_audio(args: argparse.Namespace) -> int:
+    tools = discover_tools()
+    for key in ("ffmpeg", "ffprobe", "tsmuxer"):
+        require_tool(tools, key)
+    target = Path(args.target).resolve()
+    roots = find_disc_roots([target])
+    if not roots:
+        raise ToolError(f"No BDMV folder found at {target}")
+    output_root = roots[0]
+    if args.clips:
+        requested_names = normalize_clip_names(args.clips)
+        output_stream = output_root / "BDMV" / "STREAM"
+        missing = [name for name in requested_names if not (output_stream / name).is_file()]
+        if missing:
+            raise ToolError(f"--clips referenced unknown clip(s): {', '.join(missing)}")
+        clips = [
+            inspect_clip(output_stream / name, tools, accurate_video_bitrate=False)
+            for name in requested_names
+        ]
+        candidates = clips
+        scan_scope = "requested-clips"
+    else:
+        scan = scan_disc(
+            output_root,
+            tools,
+            accurate_video_bitrate=False,
+            use_makemkv=False,
+            verbose=args.verbose,
+        )
+        clips = scan.get("clips", [])
+        candidates = clips
+        scan_scope = "full-disc"
+    stereo_bitrate = stereo_audio_bitrate_from_args(args)
+    mono_bitrate = mono_audio_bitrate_from_args(args)
+    selected: list[dict[str, Any]] = []
+    for clip in candidates:
+        reasons = compact_audio_repair_reasons(
+            clip,
+            stereo_audio_bitrate=stereo_bitrate,
+            mono_audio_bitrate=mono_bitrate,
+        )
+        if not reasons:
+            continue
+        selected.append(
+            {
+                "file": clip.get("file"),
+                "path": clip.get("path"),
+                "duration": clip.get("duration"),
+                "video_codec": (clip.get("video") or {}).get("codec_name"),
+                "reasons": reasons,
+                "before_bytes": Path(str(clip.get("path"))).stat().st_size,
+            }
+        )
+    payload: dict[str, Any] = {
+        "mode": "repair-compact-audio",
+        "output": str(output_root),
+        "audio": {
+            "mode": "compact-stereo",
+            "stereo_bitrate": stereo_bitrate,
+            "mono_bitrate": mono_bitrate,
+        },
+        "scanned_clips": len(clips),
+        "scan_scope": scan_scope,
+        "selected_count": len(selected),
+        "selected": selected,
+        "dry_run": bool(args.dry_run),
+    }
+    report_path = path_or_none(getattr(args, "report", None))
+    if args.dry_run:
+        payload["ok"] = True
+        if report_path:
+            save_job(report_path, payload)
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2))
+        else:
+            print("BD2HEVC compact-audio repair plan")
+            print(f"Output: {output_root}")
+            print(f"Clips to remux: {len(selected)}")
+            if selected:
+                print("Clips: " + ", ".join(str(item.get("file")) for item in selected[:12]))
+            print("Video and subtitles will be stream-copied; no video encoder is used.")
+        return 0
+
+    clip_lookup = clip_lookup_by_name(clips)
+    reports: list[dict[str, Any]] = []
+    for index, item in enumerate(selected, start=1):
+        name = normalize_clip_name(item.get("file"))
+        clip = clip_lookup[name]
+        print(f"Compact-audio remux {index}/{len(selected)}: {name}", flush=True)
+        report = remux_compact_audio_copy_context(clone_clip_context(output_root, output_root, clip), tools, args)
+        output_path = output_root / "BDMV" / "STREAM" / name
+        final_info = inspect_clip(output_path, tools, accurate_video_bitrate=False)
+        navigation_patch = patch_navigation_for_hevc(
+            output_root,
+            [name] if (final_info.get("video") or {}).get("codec_name") == "hevc" else [],
+            tools=tools,
+            compact_audio_clip_files=[name],
+            patch_version_headers=patch_version_headers_from_args(args),
+        )
+        final_audio = compact_audio_source_streams(final_info)
+        audio_ok = bool(final_audio) and all(
+            compact_audio_stream_matches_target(
+                audio,
+                stereo_audio_bitrate=stereo_bitrate,
+                mono_audio_bitrate=mono_bitrate,
+            )
+            for audio in final_audio
+        )
+        report.update(
+            {
+                "file": name,
+                "before_bytes": item.get("before_bytes"),
+                "after_bytes": output_path.stat().st_size,
+                "audio_ok": audio_ok,
+                "navigation_patch": navigation_patch,
+                "audio": [
+                    {
+                        "codec": audio.get("codec_name"),
+                        "channels": audio.get("channels"),
+                        "bitrate": audio.get("bit_rate"),
+                    }
+                    for audio in final_audio
+                ],
+            }
+        )
+        report["ok"] = bool(report.get("ok")) and audio_ok
+        if not report["ok"]:
+            raise ToolError(f"Compact-audio repair validation failed for {name}")
+        reports.append(report)
+    uhd_structure = ensure_uhd_backup_structure(
+        output_root,
+        patch_version_headers=patch_version_headers_from_args(args),
+    )
+    makemkv_validation = validate_disc_titles(
+        output_root,
+        tools,
+        use_makemkv=use_makemkv_from_args(args),
+        require_makemkv=args.require_makemkv,
+        verbose=args.verbose,
+    )
+    payload.update(
+        {
+            "dry_run": False,
+            "reports": reports,
+            "repaired": [report.get("file") for report in reports],
+            "bytes_saved": sum(
+                max(0, int(report.get("before_bytes") or 0) - int(report.get("after_bytes") or 0))
+                for report in reports
+            ),
+            "navigation_patches": [report.get("navigation_patch") for report in reports],
+            "uhd_structure": uhd_structure,
+            "makemkv_validation": makemkv_validation,
+        }
+    )
+    payload["ok"] = all(report.get("ok") for report in reports) and (
+        bool(makemkv_validation.get("ok")) or not args.require_makemkv
+    )
+    if report_path:
+        save_job(report_path, payload)
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print("BD2HEVC compact-audio repair " + ("complete" if payload["ok"] else "failed"))
+        print(f"Output: {output_root}")
+        print(f"Repaired clips: {len(reports)}")
+        print(f"Space saved: {payload['bytes_saved'] / (1024 ** 3):.2f} GiB")
+        if makemkv_validation.get("skipped"):
+            print("MakeMKV: skipped")
+        else:
+            print("MakeMKV: " + ("passed" if makemkv_validation.get("ok") else "failed"))
+        if report_path:
+            print(f"Full report saved to: {report_path}")
     return 0 if payload["ok"] else 4
 
 
@@ -2722,7 +3185,7 @@ def add_postprocess_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_audio_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--audio-mode", choices=AUDIO_MODES, default=DEFAULT_AUDIO_MODE, help="Audio handling for reencoded clips. passthrough keeps source audio; compact-stereo converts every audio track to AC-3 stereo, or mono when the source stream is mono.")
+    parser.add_argument("--audio-mode", choices=AUDIO_MODES, default=DEFAULT_AUDIO_MODE, help="Audio handling for full-disc conversion. passthrough keeps source audio; compact-stereo converts every playable audio track to AC-3 stereo, or mono when the source stream is mono, including clips whose video is copied.")
     parser.add_argument("--stereo-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_STEREO_AUDIO_BITRATE, help="Bitrate for compact-stereo two-channel AC-3 audio. Default 256k.")
     parser.add_argument("--mono-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_MONO_AUDIO_BITRATE, help="Bitrate for compact-stereo mono AC-3 audio. Default 128k.")
 
@@ -3001,6 +3464,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_validate.add_argument("target")
     p_validate.add_argument("--source-backup", action="store_true", help="Validate a source BD backup without requiring HEVC output clips.")
     p_validate.add_argument("--reference", default=None, help="Original BD backup folder to compare matching stream audio and timestamps against.")
+    p_validate.add_argument("--audio-mode", choices=AUDIO_MODES, default=DEFAULT_AUDIO_MODE, help="Expected audio handling when comparing against --reference. Use compact-stereo for AC-3 stereo/mono outputs.")
     p_validate.add_argument("--decode-sample", type=float, default=None, help="Decode the first N seconds of video to null.")
     p_validate.add_argument("--report", default=None, help="Write the full JSON validation report to this path.")
     p_validate.add_argument("--json", action="store_true", help="Print the full JSON report instead of a short summary.")
@@ -3130,6 +3594,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_reencode.add_argument("--decode-sample", type=float, default=10.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
     p_reencode.add_argument("--verbose", action="store_true")
     p_reencode.set_defaults(func=cmd_reencode_replacements)
+
+    p_audio_repair = command_parser(sub, "repair-compact-audio", help="Convert non-compact audio in an existing full-disc output to AC-3 without reencoding video.", description="Repair an existing converted backup in place. Video and subtitles are stream-copied, playable audio is converted to compact AC-3 mono/stereo, CLPI/MPLS metadata is updated, and each clip rolls back if validation fails. The original source backup is not required.", examples=r"""
+  py bd2hevc.py repair-compact-audio "Converted UHD-BD\Movie Disc (BD) (UHD converted)" --dry-run
+  py bd2hevc.py repair-compact-audio "Converted UHD-BD\Movie Disc (BD) (UHD converted)"
+  py bd2hevc.py repair-compact-audio "Converted UHD-BD\Movie Disc (BD) (UHD converted)" --clips 00004 00012 --require-makemkv
+""")
+    p_audio_repair.add_argument("target", help="Existing converted BD/UHD-BD backup folder to repair in place.")
+    p_audio_repair.add_argument("--clips", nargs="*", default=None, help="Optional clip filenames or ids to inspect. Defaults to every M2TS clip and repairs only audio that does not already match the compact target.")
+    p_audio_repair.add_argument("--stereo-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_STEREO_AUDIO_BITRATE, help="Bitrate for two-channel AC-3 audio. Default 256k.")
+    p_audio_repair.add_argument("--mono-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_MONO_AUDIO_BITRATE, help="Bitrate for mono AC-3 audio. Default 128k.")
+    p_audio_repair.add_argument("--decode-sample", type=float, default=10.0, help="Decode N seconds of each repaired output clip during validation. Use 0 to skip.")
+    p_audio_repair.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="library keeps BD-style navigation headers; disc patches repaired navigation headers toward UHD-style versions.")
+    add_makemkv_args(p_audio_repair)
+    p_audio_repair.add_argument("--dry-run", action="store_true", help="Show clips that need compact-audio repair without changing files.")
+    p_audio_repair.add_argument("--report", default=None, help="Write the full JSON plan or repair report to this path.")
+    p_audio_repair.add_argument("--json", action="store_true", help="Print the full JSON plan or repair report.")
+    p_audio_repair.add_argument("--verbose", action="store_true")
+    p_audio_repair.set_defaults(func=cmd_repair_compact_audio)
 
     p_repair = command_parser(sub, "repair-output", help="Automatically repair an existing converted full-disc output.", description="Inspect and repair an existing converted backup using the current replacement and navigation rules.", examples="""
   py bd2hevc.py repair-output "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"

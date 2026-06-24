@@ -143,6 +143,7 @@ def write_tsmuxer_m2ts_split_meta(
     tools: dict[str, Any],
     *,
     video_track_id: str | None = None,
+    video_stream_id: str = "V_MPEGH/ISO/HEVC",
     audio_tracks_input: Path | None = None,
     compact_audio_tracks: list[dict[str, Any]] | None = None,
     start_time_seconds: float | None = None,
@@ -161,7 +162,7 @@ def write_tsmuxer_m2ts_split_meta(
     video_options = [f"fps={fps:.3f}"]
     if video_track_id:
         video_options.insert(0, f"track={video_track_id}")
-    lines.append(f"V_MPEGH/ISO/HEVC, {quote_meta_path(video_input)}, " + ", ".join(video_options))
+    lines.append(f"{video_stream_id}, {quote_meta_path(video_input)}, " + ", ".join(video_options))
     if compact_audio_tracks is not None:
         for audio in compact_audio_tracks:
             audio_path = Path(str(audio.get("path") or ""))
@@ -215,6 +216,7 @@ def author_m2ts_split(
     tools: dict[str, Any],
     *,
     video_track_id: str | None = None,
+    video_stream_id: str = "V_MPEGH/ISO/HEVC",
     audio_tracks_input: Path | None = None,
     compact_audio_tracks: list[dict[str, Any]] | None = None,
     reference_clip_info: dict[str, Any] | None = None,
@@ -229,6 +231,7 @@ def author_m2ts_split(
         clip_info,
         tools,
         video_track_id=video_track_id,
+        video_stream_id=video_stream_id,
         audio_tracks_input=audio_tracks_input,
         compact_audio_tracks=compact_audio_tracks,
         start_time_seconds=reference_start_time(reference_clip_info or clip_info),

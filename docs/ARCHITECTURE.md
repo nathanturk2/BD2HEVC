@@ -53,7 +53,9 @@ initial open-source release.
 3. Plan clips:
    - video clips over 10 seconds are reencoded to HEVC unless already HEVC;
    - shorter clips are copied;
-   - audio and subtitles are passed through during muxing.
+   - audio and subtitles pass through by default;
+   - fixed-CQ plans skip packet-accurate bitrate work that cannot affect their
+     encoder settings.
 4. Copy the disc tree while skipping stream files that will be replaced.
 5. Encode selected video streams to temporary raw HEVC.
 6. Remux each replacement stream with the original clip's audio/subtitles using
@@ -62,6 +64,18 @@ initial open-source release.
    clips with sane stream descriptors, packet maps, and timing.
 8. Apply optional VLC/libbluray compatibility patches.
 9. Validate selected output clips and optionally scan titles with MakeMKV.
+
+With `--audio-mode compact-stereo`, playable audio is converted for both HEVC
+replacement clips and copied/already-HEVC clips. The latter use an audio-only
+remux: video and subtitles are stream-copied, CLPI/MPLS audio descriptors are
+patched to AC-3, and CPI packet positions are rescaled.
+
+`repair-compact-audio` applies that audio-only path to an existing converted
+backup without a source backup. It keeps the original M2TS and navigation bytes
+until the replacement passes media validation, then patches that clip's
+navigation before advancing. This allows per-clip rollback without a second
+full-disc copy and avoids deferring all navigation work to the end of a long
+repair.
 
 ## Queue Model
 

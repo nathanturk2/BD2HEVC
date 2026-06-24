@@ -140,6 +140,14 @@ replacement clips.
 BD2HEVC estimates the target from video-only source bitrate. Audio is ignored so
 large passthrough audio tracks do not inflate the HEVC target.
 
+Full-disc planning is metadata-first. The initial FFprobe pass establishes
+duration, codec, dimensions, tracks, and candidate actions; quality and clip
+overrides are then applied to a preview plan. Packet-size summation and coded
+padding analysis run only for final reencode actions using VBR/source-ratio
+targets. Fixed CQ does not consume source bitrate when constructing the encoder
+command, so omitting those full-file reads changes planning time rather than
+converted output.
+
 The default AVC/H.264-to-HEVC curve is intentionally an estimate, not a promise:
 there is no single bitrate that is mathematically correct from source bitrate
 alone. The model is anchored to HEVC's common target of comparable perceptual
@@ -205,6 +213,15 @@ packet count. This keeps BD-J-facing CLPI structure close to the source while
 preventing VLC/libbluray from following stale AVC packet positions past the end
 of the smaller HEVC stream.
 
+Compact-audio remuxes also update navigation metadata. CLPI program-info and
+MPLS stream-coding descriptors are changed from LPCM/other source audio types to
+AC-3, and the existing CPI packet map is scaled from the pre-remux M2TS packet
+count to the compact output. For in-place repair, the previous M2TS and CLPI
+bytes remain available until stream count, codecs, channels, video codec,
+subtitle codecs, timestamps, duration, and decode checks pass. Its navigation
+descriptors are patched before the next clip starts. A failed media validation
+is rolled back without requiring a second full-disc backup.
+
 If a source backup has no usable `BDMV/META/DL/bdmt_*.xml`, BD2HEVC creates a
 minimal `bdmt_eng.xml` with a cleaned disc title. This gives VLC/libbluray a
 normal disc name and avoids falling back to a long `bluray:///...` folder path
@@ -216,6 +233,9 @@ Validation checks include:
 
 - Long video clips are HEVC.
 - Audio codec lists match the source.
+- Compact audio has the expected playable stream count, AC-3 codec, mono/stereo
+  channel layout, and configured bitrate.
+- Audio-only remuxes preserve the video codec and subtitle codec list.
 - Source and output clip start timestamps stay aligned.
 - Long replacement clip durations stay aligned with the source.
 - Sparse source clips keep their source duration after HEVC replacement.

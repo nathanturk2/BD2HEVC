@@ -689,6 +689,114 @@ def inspect_clip(
     return info
 
 
+def refine_clip_accurate_video_bitrate(
+    clip: dict[str, Any],
+    tools: dict[str, Any],
+    *,
+    depad_video_padding: bool = True,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Add packet-accurate bitrate data to an existing metadata-only probe."""
+    path = Path(str(clip.get("path") or ""))
+    video = clip.get("video") or {}
+    duration = safe_float(clip.get("duration"))
+    codec_name = str(video.get("codec_name") or "").lower()
+    if not path.is_file() or not video or not duration or duration <= 0:
+        return clip
+
+    packet_bytes = sum_video_packet_bytes(path, tools)
+    if packet_bytes <= 0:
+        return clip
+    content_bytes = packet_bytes
+    bitrate_source = "video_packet_sum"
+    padding_report = None
+    if depad_video_padding:
+        try:
+            padding_report = count_coded_padding_bytes(path, tools, codec_name)
+        except ToolError as exc:
+            clip.setdefault("warnings", []).append(str(exc))
+        else:
+            padding_bytes = safe_int((padding_report or {}).get("padding_bytes")) or 0
+            if 0 < padding_bytes < packet_bytes:
+                content_bytes = packet_bytes - padding_bytes
+                bitrate_source = "video_packet_sum_minus_coded_padding"
+
+    video_bps = int(content_bytes * 8 / duration)
+    video.update(
+        {
+            "source_video_packet_bytes": packet_bytes,
+            "source_video_content_bytes": content_bytes,
+            "source_video_bitrate": video_bps,
+            "source_video_bitrate_mbps": mbps(video_bps),
+            "source_video_bitrate_method": bitrate_source,
+        }
+    )
+    if padding_report:
+        padding_bytes = safe_int(padding_report.get("padding_bytes")) or 0
+        padding_units = safe_int(padding_report.get("padding_units")) or 0
+        video.update(
+            {
+                "source_video_padding_bytes": padding_bytes,
+                "source_video_padding_units": padding_units,
+                "source_video_padding_kind": padding_report.get("padding_kind"),
+                "source_video_padding_bitrate_mbps": mbps(int(padding_bytes * 8 / duration)) if padding_bytes else 0,
+            }
+        )
+        if padding_report.get("padding_kind") == "h264_filler_nal":
+            video.update(
+                {
+                    "h264_filler_bytes": padding_bytes,
+                    "h264_filler_nals": padding_units,
+                    "h264_filler_bitrate_mbps": mbps(int(padding_bytes * 8 / duration)) if padding_bytes else 0,
+                }
+            )
+    fps = safe_float(video.get("fps")) or parse_rate(video.get("avg_frame_rate")) or parse_rate(video.get("r_frame_rate")) or 23.976
+    video["target_hevc"] = equivalent_hevc_bitrate(
+        video_bps=video_bps,
+        width=safe_int(video.get("width")),
+        height=safe_int(video.get("height")),
+        fps=fps,
+        duration_seconds=duration,
+        source_codec=video.get("codec_name"),
+        **(bitrate_options or {}),
+    )
+    return clip
+
+
+def refine_disc_video_bitrates(
+    report: dict[str, Any],
+    tools: dict[str, Any],
+    clip_files: set[str],
+    *,
+    depad_video_padding: bool = True,
+    bitrate_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    selected = [
+        clip
+        for clip in report.get("clips", [])
+        if str(clip.get("file") or "") in clip_files
+        and Path(str(clip.get("path") or "")).is_file()
+        and Path(str(clip.get("path") or "")).stat().st_size > 100_000_000
+    ]
+    workers = min(4, max(1, os.cpu_count() or 1), max(1, len(selected)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(
+                refine_clip_accurate_video_bitrate,
+                clip,
+                tools,
+                depad_video_padding=depad_video_padding,
+                bitrate_options=bitrate_options,
+            )
+            for clip in selected
+        ]
+        for future in as_completed(futures):
+            future.result()
+    report["summary"] = summarize_disc(report)
+    report["accurate_bitrate_clips"] = sorted(str(clip.get("file") or "") for clip in selected)
+    return report
+
+
 def compact_stream(stream: dict[str, Any] | None) -> dict[str, Any]:
     if not stream:
         return {}

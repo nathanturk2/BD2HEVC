@@ -97,6 +97,73 @@ class ModuleSplitTests(unittest.TestCase):
         self.assertIn('py bd2hevc.py diagnose "Converted UHD-BD', diagnose_help)
         self.assertIn("Default 5000", diagnose_help)
 
+    def test_repair_compact_audio_help_and_dry_run_are_public(self) -> None:
+        parser = bd.build_parser()
+        with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["repair-compact-audio", "--help"])
+            help_text = buffer.getvalue()
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("original source backup is not required", help_text.lower())
+        self.assertIn("--clips", help_text)
+        self.assertIn("--dry-run", help_text)
+        self.assertIn("--require-makemkv", help_text)
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            stream = root / "BDMV" / "STREAM"
+            stream.mkdir(parents=True)
+            clip_path = stream / "00004.m2ts"
+            clip_path.write_bytes(b"test")
+            clip = {
+                "file": clip_path.name,
+                "path": str(clip_path),
+                "duration": 8.0,
+                "video": {"codec_name": "h264"},
+                "audio": [{"codec_name": "pcm_bluray", "channels": 2, "bit_rate": "2304000"}],
+                "subtitles": [],
+            }
+            args = parser.parse_args(["repair-compact-audio", str(root), "--dry-run", "--json"])
+            with mock.patch.object(bd, "discover_tools", return_value={"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "tsmuxer": "tsmuxer"}), mock.patch.object(
+                bd, "scan_disc", return_value={"clips": [clip]}
+            ), io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+                result = args.func(args)
+                payload = json.loads(buffer.getvalue())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["selected_count"], 1)
+        self.assertEqual(payload["selected"][0]["file"], "00004.m2ts")
+        self.assertIn("pcm_bluray", payload["selected"][0]["reasons"][0])
+
+    def test_repair_compact_audio_clip_limit_probes_only_requested_files(self) -> None:
+        parser = bd.build_parser()
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            stream = root / "BDMV" / "STREAM"
+            stream.mkdir(parents=True)
+            clip_path = stream / "00004.m2ts"
+            clip_path.write_bytes(b"test")
+            clip = {
+                "file": clip_path.name,
+                "path": str(clip_path),
+                "duration": 8.0,
+                "video": {"codec_name": "h264"},
+                "audio": [{"codec_name": "pcm_bluray", "channels": 2, "bit_rate": "2304000"}],
+                "subtitles": [],
+            }
+            args = parser.parse_args(["repair-compact-audio", str(root), "--clips", "00004", "--dry-run", "--json"])
+            with mock.patch.object(bd, "discover_tools", return_value={"ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "tsmuxer": "tsmuxer"}), mock.patch.object(
+                bd, "inspect_clip", return_value=clip
+            ) as inspect, mock.patch.object(bd, "scan_disc", side_effect=AssertionError("full scan should not run")), io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
+                result = args.func(args)
+                payload = json.loads(buffer.getvalue())
+
+        self.assertEqual(result, 0)
+        self.assertEqual(payload["scan_scope"], "requested-clips")
+        self.assertEqual(payload["scanned_clips"], 1)
+        inspect.assert_called_once_with(clip_path, mock.ANY, accurate_video_bitrate=False)
+
     def test_record_libbluray_help_and_command_builder(self) -> None:
         parser = bd.build_parser()
         with io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
@@ -685,6 +752,120 @@ class BitratePresetTests(unittest.TestCase):
 
 
 class CopyPlanningTests(unittest.TestCase):
+    def test_fixed_cq_plan_does_not_need_accurate_source_bitrate(self) -> None:
+        clips = [
+            {
+                "file": "00001.m2ts",
+                "action": "reencode",
+                "duration": 1500.0,
+                "video": {
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 23.976,
+                    "source_video_bitrate": 30_000_000,
+                    "target_hevc": {"rate_control": "vbr"},
+                },
+            }
+        ]
+        args = argparse.Namespace(quality="cq:20", copy_clips=None)
+
+        selected = bd.source_bitrate_files_for_effective_plan(clips, {"mode": "compact-cq", "compact_cq_value": 20}, args)
+
+        self.assertEqual(selected, set())
+
+    def test_mixed_plan_measures_only_final_vbr_clips(self) -> None:
+        clips = [
+            {
+                "file": "00001.m2ts",
+                "action": "reencode",
+                "duration": 1500.0,
+                "video": {"codec_name": "h264", "width": 1920, "height": 1080, "fps": 23.976, "source_video_bitrate": 30_000_000, "target_hevc": {"rate_control": "vbr"}},
+            },
+            {
+                "file": "00002.m2ts",
+                "action": "reencode",
+                "duration": 7200.0,
+                "video": {"codec_name": "h264", "width": 1920, "height": 1080, "fps": 23.976, "source_video_bitrate": 30_000_000, "target_hevc": {"rate_control": "vbr"}},
+            },
+        ]
+        args = argparse.Namespace(quality=None, main_title_quality="cq:18", copy_clips=None)
+
+        selected = bd.source_bitrate_files_for_effective_plan(clips, {"mode": "balanced"}, args)
+
+        self.assertEqual(selected, {"00001.m2ts"})
+
+    def test_cq_target_is_unchanged_after_accurate_bitrate_refinement(self) -> None:
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "00001.m2ts"
+            path.write_bytes(b"x")
+            options = {"mode": "compact-cq", "compact_cq_value": 20, "anime_cq_min_duration": 10.0}
+            clip = {
+                "file": path.name,
+                "path": str(path),
+                "duration": 1500.0,
+                "warnings": [],
+                "video": {
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 23.976,
+                    "source_video_bitrate": 5_000_000,
+                    "target_hevc": bitrate.equivalent_hevc_bitrate(
+                        video_bps=5_000_000,
+                        width=1920,
+                        height=1080,
+                        fps=23.976,
+                        duration_seconds=1500.0,
+                        source_codec="h264",
+                        **options,
+                    ),
+                },
+            }
+            before = dict(clip["video"]["target_hevc"])
+            with mock.patch.object(scan, "sum_video_packet_bytes", return_value=6_000_000_000), mock.patch.object(
+                scan, "count_coded_padding_bytes", return_value={"padding_bytes": 1_000_000_000, "padding_units": 1, "padding_kind": "h264_filler_nal"}
+            ):
+                scan.refine_clip_accurate_video_bitrate(clip, {"ffprobe": "ffprobe"}, bitrate_options=options)
+
+            self.assertEqual(clip["video"]["target_hevc"], before)
+
+    def test_compact_audio_navigation_descriptors_are_patched_to_ac3(self) -> None:
+        with TemporaryDirectory() as temp:
+            clpi = Path(temp) / "00004.clpi"
+            program = (
+                b"\x00\x01"
+                + b"\x00\x00\x00\x00\x01\x00\x01\x00"
+                + b"\x11\x00\x05\x80\x31eng"
+            )
+            program_section = len(program).to_bytes(4, "big") + program
+            program_start = 32
+            cpi_start = program_start + len(program_section)
+            header = bytearray(b"HDMV0200" + b"\x00" * 24)
+            header[8:12] = (28).to_bytes(4, "big")
+            header[12:16] = program_start.to_bytes(4, "big")
+            header[16:20] = cpi_start.to_bytes(4, "big")
+            header[20:24] = cpi_start.to_bytes(4, "big")
+            clpi.write_bytes(bytes(header) + program_section)
+
+            report = navigation.patch_clpi_for_output(clpi, patch_video_to_hevc=False, compact_audio=True)
+
+            self.assertEqual(report["compact_audio_patches"], 1)
+            self.assertIn(b"\x11\x00\x05\x81\x31eng", clpi.read_bytes())
+
+    def test_compact_audio_mpls_patch_is_scoped_to_selected_clip(self) -> None:
+        with TemporaryDirectory() as temp:
+            mpls = Path(temp) / "00001.mpls"
+            audio_descriptor = b"\x09\x01\x11\x00\x00\x00\x00\x00\x00\x00\x05\x80\x31eng"
+            item_body = b"00004" + b"\x00" * 8 + audio_descriptor
+            playlist = (200).to_bytes(4, "big") + b"\x00\x00" + (1).to_bytes(2, "big") + b"\x00\x00" + len(item_body).to_bytes(2, "big") + item_body
+            mpls.write_bytes(b"MPLS0200" + (20).to_bytes(4, "big") + b"\x00" * 8 + playlist)
+
+            report = navigation.patch_mpls_for_hevc(mpls, set(), compact_audio_clip_ids={"00004"})
+
+            self.assertEqual(report["compact_audio_patches"], 1)
+            self.assertIn(b"\x05\x81\x31eng", mpls.read_bytes())
+
     def test_uhd_structure_library_restores_bd_versions_and_mirrors_required_backups(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -932,6 +1113,20 @@ class CopyPlanningTests(unittest.TestCase):
 
 
 class CommandConstructionTests(unittest.TestCase):
+    def test_compact_audio_repair_selects_only_nonmatching_playable_audio(self) -> None:
+        pcm_clip = {"video": {"codec_name": "hevc"}, "audio": [{"codec_name": "pcm_bluray", "channels": 2, "bit_rate": "2304000"}]}
+        compact_clip = {"video": {"codec_name": "hevc"}, "audio": [{"codec_name": "ac3", "channels": 2, "bit_rate": "256000"}]}
+        surround_clip = {"video": {"codec_name": "hevc"}, "audio": [{"codec_name": "ac3", "channels": 6, "bit_rate": "640000"}]}
+
+        pcm_reasons = bd.compact_audio_repair_reasons(pcm_clip, stereo_audio_bitrate=256_000, mono_audio_bitrate=128_000)
+        compact_reasons = bd.compact_audio_repair_reasons(compact_clip, stereo_audio_bitrate=256_000, mono_audio_bitrate=128_000)
+        surround_reasons = bd.compact_audio_repair_reasons(surround_clip, stereo_audio_bitrate=256_000, mono_audio_bitrate=128_000)
+
+        self.assertEqual(len(pcm_reasons), 1)
+        self.assertIn("pcm_bluray", pcm_reasons[0])
+        self.assertEqual(compact_reasons, [])
+        self.assertEqual(len(surround_reasons), 1)
+
     def test_compact_cq_nvenc_uses_lean_handbrake_like_cq(self) -> None:
         clip_info = {
             "video": {
@@ -1053,6 +1248,33 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("A_AC3", text)
         self.assertIn("S_HDMV/PGS", text)
 
+    def test_compact_audio_copy_remux_keeps_source_video_codec(self) -> None:
+        tracks = [
+            {"track": "4113", "stream_id": "V_MPEG4/ISO/AVC"},
+            {"track": "4352", "stream_id": "A_LPCM", "stream_lang": "eng"},
+        ]
+        compact_audio = [{"path": "work/00004.audio00.ac3", "language": "eng"}]
+        clip_info = {"video": {"fps": 23.976, "width": 1920, "height": 1080}}
+        with TemporaryDirectory() as temp, mock.patch.object(muxing, "parse_tsmuxer_tracks", return_value=tracks):
+            meta = Path(temp) / "00004.meta"
+
+            muxing.write_tsmuxer_m2ts_split_meta(
+                Path("source.m2ts"),
+                Path("source.m2ts"),
+                meta,
+                clip_info,
+                {"tsmuxer": "tsmuxer"},
+                video_track_id="4113",
+                video_stream_id="V_MPEG4/ISO/AVC",
+                compact_audio_tracks=compact_audio,
+            )
+
+            text = meta.read_text(encoding="utf-8")
+
+        self.assertIn("V_MPEG4/ISO/AVC", text)
+        self.assertIn("A_AC3", text)
+        self.assertNotIn("A_LPCM", text)
+
     def test_compact_audio_tracks_are_elementary_ac3_files(self) -> None:
         clip_info = {
             "audio": [
@@ -1096,6 +1318,78 @@ class CommandConstructionTests(unittest.TestCase):
         self.assertIn("0:2", cmd)
         self.assertNotIn("0:3", cmd)
         self.assertEqual([Path(item["path"]).name for item in outputs], ["00123.audio00.ac3", "00123.audio01.ac3"])
+
+    def test_compact_audio_validation_ignores_zero_channel_probe_artifacts(self) -> None:
+        with TemporaryDirectory() as temp:
+            source = Path(temp) / "source.m2ts"
+            output_path = Path(temp) / "output.m2ts"
+            source.write_bytes(b"source")
+            output_path.write_bytes(b"output")
+            probe = {
+                "ok": True,
+                "duration": None,
+                "format_start_time": 600.0,
+                "video": None,
+                "audio": [{"codec_name": "mp3", "channels": 0}],
+            }
+            with mock.patch.object(validation, "inspect_clip", side_effect=[probe, probe]):
+                report = validation.validate_clip(
+                    source,
+                    output_path,
+                    {"ffmpeg": "ffmpeg"},
+                    require_hevc="never",
+                    audio_mode="compact-stereo",
+                )
+
+        self.assertTrue(report["ok"])
+        track_check = next(check for check in report["checks"] if check["name"] == "compact_audio_track_count_matches_source")
+        self.assertEqual(track_check["source_count"], 0)
+        self.assertEqual(track_check["output_count"], 0)
+
+    def test_in_place_compact_audio_remux_preserves_video_file_on_success(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            output_path = root / "BDMV" / "STREAM" / "00001.m2ts"
+            output_clpi = root / "BDMV" / "CLIPINF" / "00001.clpi"
+            backup_clpi = root / "BDMV" / "BACKUP" / "CLIPINF" / "00001.clpi"
+            output_path.parent.mkdir(parents=True)
+            output_clpi.parent.mkdir(parents=True)
+            backup_clpi.parent.mkdir(parents=True)
+            output_path.write_bytes(b"old-video-and-pcm")
+            output_clpi.write_bytes(b"old-clpi")
+            backup_clpi.write_bytes(b"old-backup-clpi")
+            clip = {
+                "file": output_path.name,
+                "path": str(output_path),
+                "video": {"codec_name": "hevc"},
+                "audio": [{"index": 1, "codec_name": "pcm_bluray", "channels": 2}],
+            }
+            ctx = bd.clone_clip_context(root, root, clip)
+            args = argparse.Namespace(verbose=False, stereo_audio_bitrate=256_000, mono_audio_bitrate=128_000, decode_sample=1.0, uhd_profile="library")
+
+            def write_remux(_video, _tracks, destination, *_args, **_kwargs):
+                destination.write_bytes(b"same-video-with-ac3")
+
+            validation_report = {
+                "ok": True,
+                "checks": [],
+                "output_probe": {"video": {"codec_name": "hevc"}},
+            }
+            with mock.patch.object(bd, "parse_tsmuxer_tracks", return_value=[{"track": "4113", "stream_id": "V_MPEGH/ISO/HEVC"}]), mock.patch.object(
+                bd, "transcode_compact_audio_tracks", return_value=([{"path": str(root / "audio.ac3")}], [])
+            ), mock.patch.object(bd, "author_m2ts_split", side_effect=write_remux), mock.patch.object(
+                bd, "validate_clip", return_value=validation_report
+            ), mock.patch.object(bd, "patch_clpi_for_output", return_value={"patched": True}) as patch_clpi, mock.patch.object(
+                bd, "scale_clpi_cpi_map_to_stream", return_value={"scaled": True}
+            ):
+                report = bd.remux_compact_audio_copy_context(ctx, {"tsmuxer": "tsmuxer"}, args)
+
+            self.assertTrue(report["ok"])
+            self.assertEqual(output_path.read_bytes(), b"same-video-with-ac3")
+            self.assertFalse(output_path.with_name("00001.precompact.tmp.m2ts").exists())
+            patch_clpi.assert_called_once()
+            self.assertTrue(patch_clpi.call_args.kwargs["patch_video_to_hevc"])
+            self.assertEqual(backup_clpi.read_bytes(), output_clpi.read_bytes())
 
     def test_main_title_cq_override_targets_longest_reencoded_clip(self) -> None:
         clips = [
