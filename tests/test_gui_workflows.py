@@ -72,7 +72,8 @@ class GuiTests(unittest.TestCase):
 
     def close_app(self):
         for callback in self.app.tk.call('after', 'info'):
-            self.app.after_cancel(callback)
+            # The widget that registered the command owns its destruction.
+            self.app.tk.call('after', 'cancel', callback)
         self.app.destroy()
 
     def source(self, name="Film"):
