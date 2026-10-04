@@ -1,6 +1,8 @@
 # Release Checklist
 
-Use this before publishing BD2HEVC.
+Use this before publishing the **BD2HEVC 0.2.0a2 alpha update**. The
+[release preparation guide](PUBLISHING.md) defines the current artifact and
+playback gates; the detailed checks below supplement it.
 
 ## Current Readiness
 
@@ -13,16 +15,17 @@ command wrappers, queue planning, and parser dispatch.
 
 Further splitting is optional polish. It may be useful later if contributors
 want to work independently on CLI command construction or conversion workflow
-orchestration, but it should not block `v0.1.0`.
+orchestration. CLI configuration, planning and conversion workflows now have
+their own modules, with regression coverage preserving their public wrappers.
 
 ## Repository
 
-- Initialize git if this folder is not already a repository.
+- Review and commit the complete intended update.
 - Confirm source backups, converted discs, logs, external binaries, and reports
   are ignored by `.gitignore`.
 - Keep the included GitHub Actions CI workflow and issue templates unless you
-  prefer to customize them before the first push.
-- Pick a public version tag, for example `v0.1.0`.
+  prefer to customize them.
+- Use the new public version tag `v0.2.0a2` after release checks pass.
 - Confirm the public release folder does not contain `__pycache__`, reports,
   logs, source backups, converted outputs, private paths, or external binaries.
 
@@ -60,7 +63,7 @@ Validate a converted output:
 python bd2hevc.py validate "Converted UHD-BD/My Disc (BD) (UHD converted)" --reference "MY_DISC_BACKUP" --no-makemkv --decode-sample 0
 ```
 
-## Suggested First Release Notes
+## Suggested Update Release Notes
 
 - Full-disc Blu-ray backup conversion to HEVC.
 - Friendly foreground and background workflows: `auto`, `start`, `status`, and

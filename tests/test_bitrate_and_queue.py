@@ -1,5 +1,7 @@
-﻿import argparse
+from navigation_fixtures import clpi as make_clpi, mpls as make_mpls
+import argparse
 import contextlib
+import base64
 import io
 import os
 import subprocess
@@ -7,6 +9,7 @@ import json
 import threading
 import unittest
 import zipfile
+import zlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -16,6 +19,67 @@ from bd2hevc_app import bdj, bitrate, config, diagnostics, encoding, libbluray_r
 
 
 class ModuleSplitTests(unittest.TestCase):
+    def test_default_deinterlace_plan_filters_only_interlaced_reencoded_clips(self) -> None:
+        parser = bd.build_parser()
+        for command in ("auto", "start", "queue", "clips", "scan", "convert"):
+            with self.subTest(command=command):
+                args = parser.parse_args([command, "Disc"])
+                self.assertEqual(args.deinterlace, "auto")
+        clips = [
+            {"file": "00001.m2ts", "action": "reencode", "video": {"field_order": "tt"}},
+            {"file": "00002.m2ts", "action": "reencode", "video": {"field_order": "progressive"}},
+            {"file": "00003.m2ts", "action": "copy", "video": {"field_order": "tt"}},
+        ]
+        report = bd.apply_deinterlace_plan(clips, parser.parse_args(["auto", "Disc"]))
+        self.assertEqual(report["matched_count"], 1)
+        self.assertTrue(clips[0]["video"]["postprocess"]["deinterlace"]["enabled"])
+        self.assertNotIn("postprocess", clips[1]["video"])
+        self.assertNotIn("postprocess", clips[2]["video"])
+
+    def test_queued_deinterlace_modes_survive_command_round_trip(self) -> None:
+        parser = bd.build_parser()
+        for mode in ("auto", "off", "force"):
+            with self.subTest(mode=mode):
+                flags = [] if mode == "auto" else ["--deinterlace", mode]
+                args = parser.parse_args(["start", "Disc", *flags])
+                command = bd.auto_command_for_job(args, Path("out"), Path("report.json"))
+                index = command.index("--deinterlace")
+                self.assertEqual(command[index + 1], mode)
+                replay = parser.parse_args(command[command.index("auto"):])
+                self.assertEqual(replay.deinterlace, mode)
+
+    def test_saved_deinterlace_modes_and_explicit_overrides(self) -> None:
+        parser = bd.build_parser()
+        with TemporaryDirectory() as temp, mock.patch.dict(os.environ, {presets.PRESET_DIR_ENV: temp}):
+            for mode in ("auto", "off"):
+                flags = [] if mode == "auto" else ["--deinterlace", mode]
+                args = parser.parse_args(["preset", "save", mode, *flags])
+                data = presets.preset_data_from_args(args)
+                self.assertEqual(data["deinterlace"], mode)
+                (Path(temp) / f"{mode}.json").write_text(json.dumps(data))
+                loaded = parser.parse_args(["auto", "Disc", "--preset", mode])
+                bd.apply_named_preset_to_args(loaded)
+                self.assertEqual(loaded.deinterlace, mode)
+                other = "off" if mode == "auto" else "auto"
+                explicit = parser.parse_args(["auto", "Disc", "--preset", mode, "--deinterlace", other])
+                bd.apply_named_preset_to_args(explicit)
+                self.assertEqual(explicit.deinterlace, other)
+
+    def test_queue_generated_names_preserve_source_case_and_allow_tags_off(self) -> None:
+        parser = bd.build_parser()
+        source = Path("Star Trek TNG - Season 1, Disc 1")
+
+        tagged = parser.parse_args(["queue", str(source), "--output-dir", "converted"])
+        untagged = parser.parse_args(
+            ["queue", str(source), "--output-dir", "converted", "--no-output-tags"]
+        )
+
+        self.assertEqual(
+            bd.queue_output_for(source, tagged).name,
+            "Star Trek TNG - Season 1, Disc 1 (BD) (UHD converted)",
+        )
+        self.assertEqual(bd.queue_output_for(source, untagged).name, source.name)
+
     def test_cli_help_points_to_command_specific_examples(self) -> None:
         parser = bd.build_parser()
         help_text = parser.format_help()
@@ -158,11 +222,12 @@ class ModuleSplitTests(unittest.TestCase):
             ) as inspect, mock.patch.object(bd, "scan_disc", side_effect=AssertionError("full scan should not run")), io.StringIO() as buffer, contextlib.redirect_stdout(buffer):
                 result = args.func(args)
                 payload = json.loads(buffer.getvalue())
+            expected_clip_path = clip_path.resolve()
 
         self.assertEqual(result, 0)
         self.assertEqual(payload["scan_scope"], "requested-clips")
         self.assertEqual(payload["scanned_clips"], 1)
-        inspect.assert_called_once_with(clip_path, mock.ANY, accurate_video_bitrate=False)
+        inspect.assert_called_once_with(expected_clip_path, mock.ANY, accurate_video_bitrate=False)
 
     def test_record_libbluray_help_and_command_builder(self) -> None:
         parser = bd.build_parser()
@@ -394,7 +459,7 @@ class BDJCompatibilityPatchTests(unittest.TestCase):
                 ):
                     report = bdj.patch_known_bdj_compatibility(root)
 
-                patcher.assert_called_once_with(root, fixes=expected_fixes, backup=True)
+                patcher.assert_called_once_with(root.resolve(), fixes=expected_fixes, backup=True)
                 self.assertEqual(report["patches"], [patch_report])
                 self.assertTrue(report["patched"])
 
@@ -412,15 +477,28 @@ class BDJCompatibilityPatchTests(unittest.TestCase):
         self.assertEqual(report["patches"], [])
         self.assertFalse(report["patched"])
 
-    def test_music_jukebox_signature_requires_helper_and_state_patch_points(self) -> None:
+    def test_music_jukebox_signature_requires_all_playlist_persistence_patch_points(self) -> None:
         with TemporaryDirectory() as temp:
             jar = Path(temp) / "00000.jar"
             with zipfile.ZipFile(jar, "w") as zf:
                 zf.writestr("com/wb/bdj/menu/MusicJukeboxButtonHelper.class", b"helper")
+                zf.writestr("com/wb/bdj/menu/be.class", b"menu")
+                zf.writestr("com/wb/bdj/menu/k.class", b"group")
                 zf.writestr("com/wb/bdj/controller/MusicJukeboxState.class", b"state")
+                zf.writestr("com/wb/bdj/controller/b.class", b"timer")
             with (
                 mock.patch.object(bdj, "patch_music_jukebox_button_queues_state", return_value=(b"helper", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_button_keeps_playlist_group_separate", return_value=(b"menu", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_group_restores_authored_position", return_value=(b"group", {"matches": 1})),
                 mock.patch.object(bdj, "patch_music_jukebox_state_restores_default_focus", return_value=(b"state", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_state_uses_current_menu_component", return_value=(b"state", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_state_resets_overlay_before_redraw", return_value=(b"state", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_state_schedules_entry_redraw", return_value=(b"state", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_idle_timer_keeps_playlist_visible", return_value=(b"timer", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_idle_timer_restores_graphics_lookup", return_value=(b"timer", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_idle_timer_draws_incoming_playlist", return_value=(b"timer", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_idle_timer_restores_group_geometry", return_value=(b"timer", {"matches": 1})),
+                mock.patch.object(bdj, "patch_music_jukebox_idle_timer_repeats_playlist_redraw", return_value=(b"timer", {"matches": 1})),
             ):
                 self.assertTrue(bdj.jar_has_music_jukebox_queued_state_signature(jar))
 
@@ -430,8 +508,48 @@ class BDJCompatibilityPatchTests(unittest.TestCase):
                 return_value=(b"helper", {"matches": 1}),
             ), mock.patch.object(
                 bdj,
+                "patch_music_jukebox_button_keeps_playlist_group_separate",
+                return_value=(b"menu", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_group_restores_authored_position",
+                return_value=(b"group", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
                 "patch_music_jukebox_state_restores_default_focus",
                 return_value=(b"state", {"matches": 0, "error": "missing state hook"}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_state_uses_current_menu_component",
+                return_value=(b"state", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_state_resets_overlay_before_redraw",
+                return_value=(b"state", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_state_schedules_entry_redraw",
+                return_value=(b"state", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_idle_timer_keeps_playlist_visible",
+                return_value=(b"timer", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_idle_timer_restores_graphics_lookup",
+                return_value=(b"timer", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_idle_timer_draws_incoming_playlist",
+                return_value=(b"timer", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_idle_timer_restores_group_geometry",
+                return_value=(b"timer", {"matches": 1}),
+            ), mock.patch.object(
+                bdj,
+                "patch_music_jukebox_idle_timer_repeats_playlist_redraw",
+                return_value=(b"timer", {"matches": 1}),
             ):
                 self.assertFalse(bdj.jar_has_music_jukebox_queued_state_signature(jar))
 
@@ -440,7 +558,272 @@ class BDJCompatibilityPatchTests(unittest.TestCase):
                 zf.writestr("com/wb/bdj/menu/MusicJukeboxButtonHelper.class", b"helper")
             self.assertFalse(bdj.jar_has_music_jukebox_queued_state_signature(missing_state))
 
-    def test_music_jukebox_menu_layer_patch_appends_authored_group_only(self) -> None:
+            missing_timer = Path(temp) / "missing-timer.jar"
+            with zipfile.ZipFile(missing_timer, "w") as zf:
+                zf.writestr("com/wb/bdj/menu/MusicJukeboxButtonHelper.class", b"helper")
+                zf.writestr("com/wb/bdj/menu/be.class", b"menu")
+                zf.writestr("com/wb/bdj/controller/MusicJukeboxState.class", b"state")
+            self.assertFalse(bdj.jar_has_music_jukebox_queued_state_signature(missing_timer))
+
+    def test_music_jukebox_helper_queues_state_before_drawing_and_focus(self) -> None:
+        data = b"synthetic-class"
+        captured: dict[str, object] = {}
+
+        def capture_replacement(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            captured.update(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([], 0)),
+            mock.patch.object(bdj, "find_cp_methodref", side_effect=[1, 2]),
+            mock.patch.object(bdj, "find_cp_fieldref", side_effect=[3, 4, 5]),
+            mock.patch.object(bdj, "find_cp_class", return_value=6),
+            mock.patch.object(bdj, "find_cp_interface_methodref", return_value=7),
+            mock.patch.object(
+                bdj,
+                "add_cp_interface_methodref",
+                side_effect=[(data, 8), (data, 9), (data, 10), (data, 11)],
+            ),
+            mock.patch.object(bdj, "add_cp_methodref", return_value=(data, 12)),
+            mock.patch.object(bdj, "replace_in_method_code_resized", side_effect=capture_replacement),
+        ):
+            _, report = bdj.patch_music_jukebox_button_queues_state(data)
+
+        replacement = captured["new"]
+        self.assertIsInstance(replacement, bytes)
+        add_menu_call = b"\xb9\x00\x07\x02\x00"
+        focus_call = b"\xb9\x00\x09\x02\x00"
+        queued_state_call = b"\xb9\x00\x08\x03\x00"
+        self.assertLess(replacement.index(queued_state_call), replacement.index(add_menu_call))
+        self.assertLess(replacement.index(add_menu_call), replacement.index(focus_call))
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_button_keeps_original_group_layer_separate(self) -> None:
+        separate_constructor_tail = b"\xb5\x00\x02\xb1"
+        data = b"prefix" + separate_constructor_tail + b"suffix"
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([], 0)),
+            mock.patch.object(bdj, "find_cp_fieldref", side_effect=[1, 2]),
+        ):
+            patched, report = bdj.patch_music_jukebox_button_keeps_playlist_group_separate(data)
+
+        self.assertEqual(patched, data)
+        self.assertTrue(report["already_patched"])
+        self.assertEqual(report["matches"], 0)
+
+    def test_music_jukebox_idle_timer_keeps_playlist_visible(self) -> None:
+        data = b"synthetic-timer-class"
+        captured: dict[str, object] = {}
+
+        def capture_replacement(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            captured.update(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([], 0)),
+            mock.patch.object(bdj, "find_cp_class", return_value=1),
+            mock.patch.object(bdj, "find_cp_methodref", side_effect=[2, 5, 3, 4]),
+            mock.patch.object(bdj, "replace_in_method_code", side_effect=capture_replacement),
+        ):
+            _, report = bdj.patch_music_jukebox_idle_timer_keeps_playlist_visible(data)
+
+        self.assertEqual(captured["method_name"], "run")
+        self.assertEqual(captured["old"], b"\x2b\xc0\x00\x01\x03\xb6\x00\x02")
+        self.assertEqual(captured["new"], b"\x2b\xc0\x00\x01\x04\xb6\x00\x02")
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_state_uses_current_menu_component(self) -> None:
+        data = b"synthetic-timer-class"
+        captured: dict[str, object] = {}
+
+        def capture_replacement(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            captured.update(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([], 0)),
+            mock.patch.object(bdj, "find_cp_methodref", side_effect=[13, 5, 7, 9, 11]),
+            mock.patch.object(bdj, "find_cp_fieldref", side_effect=[1, 3, 1, 3]),
+            mock.patch.object(bdj, "add_cp_methodref", return_value=(data, 13)),
+            mock.patch.object(bdj, "replace_in_method_code_resized", side_effect=capture_replacement),
+        ):
+            _, report = bdj.patch_music_jukebox_state_uses_current_menu_component(data)
+
+        self.assertEqual(captured["method_name"], "c")
+        self.assertEqual(
+            captured["old"],
+            b"\x2a\xb4\x00\x03\xb6\x00\x05\xb6\x00\x0b\xc7\x00\x17"
+            b"\x2a\xb4\x00\x03\xb6\x00\x05\xb6\x00\x09"
+            b"\x2a\xb4\x00\x03\xb6\x00\x05\xb6\x00\x07"
+            b"\x2a\xb4\x00\x03\xb6\x00\x05\xb0",
+        )
+        self.assertEqual(
+            captured["new"],
+            b"\xb8\x00\x0d\xb0",
+        )
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_timer_uses_group_geometry_reset_hook(self) -> None:
+        data = b"synthetic-timer-class"
+        captured: dict[str, object] = {}
+
+        def capture_replacement(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            captured.update(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([], 0)),
+            mock.patch.object(bdj, "find_cp_class", side_effect=[3, 3]),
+            mock.patch.object(bdj, "find_cp_methodref", side_effect=[5, 5, 7]),
+            mock.patch.object(bdj, "add_cp_methodref", return_value=(data, 7)),
+            mock.patch.object(bdj, "replace_in_method_code", side_effect=capture_replacement),
+        ):
+            _, report = bdj.patch_music_jukebox_idle_timer_restores_group_geometry(data)
+
+        self.assertEqual(captured["old"], b"\x2b\xc0\x00\x03\x04\xb6\x00\x05")
+        self.assertEqual(captured["new"], b"\x2b\xc0\x00\x03\x04\xb6\x00\x07")
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_group_reset_restores_authored_position_and_visibility(self) -> None:
+        data = b"synthetic-group-class"
+        captured: dict[str, object] = {}
+
+        def capture_replacement(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            captured.update(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([], 0)),
+            mock.patch.object(bdj, "find_cp_fieldref", side_effect=[3, 5, 3, 5, 7, 9]),
+            mock.patch.object(bdj, "find_cp_methodref", return_value=11),
+            mock.patch.object(bdj, "add_cp_fieldref", side_effect=[(data, 7), (data, 9)]),
+            mock.patch.object(bdj, "replace_in_method_code_resized", side_effect=capture_replacement),
+        ):
+            _, report = bdj.patch_music_jukebox_group_restores_authored_position(data)
+
+        self.assertEqual(captured["method_name"], "e")
+        self.assertEqual(captured["old"], b"\xb1")
+        self.assertEqual(
+            captured["new"],
+            b"\x2a\x2a\xb4\x00\x07\xb5\x00\x03"
+            b"\x2a\x2a\xb4\x00\x09\xb5\x00\x05"
+            b"\x2a\x1b\xb6\x00\x0b\xb1",
+        )
+        self.assertEqual(captured["min_max_stack"], 2)
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_state_resets_overlay_before_redraw(self) -> None:
+        data = b"synthetic-state-class"
+        captured: dict[str, object] = {}
+
+        def capture_replacement(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            if kwargs["old"] != b"\x2a\x1f\xb5\x00\x05\xb1":
+                return class_data, {"matches": 0, "already_patched": False}
+            captured.update(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([], 0)),
+            mock.patch.object(bdj, "find_cp_fieldref", side_effect=[5, 3, 5]),
+            mock.patch.object(bdj, "find_cp_methodref", side_effect=[7, 13, 9, 11]),
+            mock.patch.object(
+                bdj,
+                "add_cp_methodref",
+                side_effect=[(data, 7), (data, 9), (data, 11)],
+            ),
+            mock.patch.object(bdj, "replace_in_method_code_resized", side_effect=capture_replacement),
+        ):
+            _, report = bdj.patch_music_jukebox_state_resets_overlay_before_redraw(data)
+
+        self.assertEqual(captured["method_name"], "a")
+        self.assertEqual(captured["descriptor"], "(Lcom/wb/bdj/controller/MusicJukeboxState;J)V")
+        self.assertEqual(captured["old"], b"\x2a\x1f\xb5\x00\x05\xb1")
+        self.assertEqual(
+            captured["new"],
+            b"\x1f\x07\x85\x94\x9a\x00\x0f"
+            b"\xb8\x00\x07\xb6\x00\x09"
+            b"\xb8\x00\x07\xb6\x00\x0b"
+            b"\x2a\x1f\xb5\x00\x05\xb1",
+        )
+        self.assertEqual(captured["min_max_stack"], 4)
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_state_schedules_entry_redraw(self) -> None:
+        data = b"synthetic-state-class"
+        long_1000 = {"tag": 5, "raw": b"\x05" + (1000).to_bytes(8, "big", signed=True)}
+        captured: dict[str, object] = {}
+
+        def capture_insertion(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            captured.update(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([None, long_1000], 0)),
+            mock.patch.object(bdj, "find_cp_class", return_value=2),
+            mock.patch.object(bdj, "find_cp_methodref", side_effect=[3, 4, 5]),
+            mock.patch.object(bdj, "find_cp_fieldref", side_effect=[6, 7]),
+            mock.patch.object(bdj, "insert_in_method_code", side_effect=capture_insertion),
+        ):
+            _, report = bdj.patch_music_jukebox_state_schedules_entry_redraw(data)
+
+        self.assertEqual(captured["method_name"], "a")
+        self.assertEqual(captured["marker"], b"\xb8\x00\x05")
+        self.assertIn(b"\xbb\x00\x02", captured["insertion"])
+        self.assertIn(b"\xb6\x00\x04", captured["insertion"])
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_idle_timer_repeats_playlist_redraw(self) -> None:
+        data = b"synthetic-timer-class"
+        long_ten = {"tag": 5, "raw": b"\x05" + (10).to_bytes(8, "big", signed=True)}
+        replacements: list[dict[str, object]] = []
+
+        def capture_replacement(class_data: bytes, **kwargs: object) -> tuple[bytes, dict[str, object]]:
+            replacements.append(kwargs)
+            return class_data, {"matches": 1, "already_patched": False}
+
+        with (
+            mock.patch.object(bdj, "parse_constant_pool", return_value=([None, long_ten], 0)),
+            mock.patch.object(bdj, "find_cp_methodref", side_effect=[2, 4]),
+            mock.patch.object(bdj, "find_cp_fieldref", return_value=3),
+            mock.patch.object(bdj, "replace_in_method_code", side_effect=capture_replacement),
+        ):
+            _, report = bdj.patch_music_jukebox_idle_timer_repeats_playlist_redraw(data)
+
+        self.assertEqual(len(replacements), 3)
+        self.assertEqual(replacements[0]["old"], b"\x14\x00\x01")
+        self.assertEqual(replacements[0]["new"], b"\x07\x85\x00")
+        self.assertEqual(report["matches"], 1)
+
+    def test_music_jukebox_timer_draws_incoming_hidden_playlist(self) -> None:
+        original = zlib.decompress(
+            base64.b64decode(
+                "eNqVVFtT00AU/tYCMSFIgQIqXvBK2lBW8QaWq0XRWvQBRgfekpCpoWnCpKn45K/whfEH+OwMxo4PDr744I9yPNuKt9SZNjPn2823355zNid7vn3/9BkAx9NuNB9FwpKEZQn3JOQlrEi4L+GBhEcSChIey+jCRRndmFCQwFkB5wScF3BJwBUFPUgrkHBBwXGMK5BxWUBGgQJNgYozAq6qmEFWxRy4gBsCbgq4JeC2gLsq5nFdwB0VC7imYhFTKlaRU/EQkyqK0FWsYYphREsXLb/C90xubu/wiu3VuFnJMQzTwo7x0uDGXshXA2P3hWNViU9o6WcN3GKY1P7ca/leGPiuawd8rVZ1rEKtbJv+q/XQCO1cusCw2IH8d+y8X9n1PdsLKfh8xx5cwyvx9TBwvFKus4TplNn25QWhX25f38yuFjou33AqdrBhVMuNmLoWq0c5F6/E9EpDPaHFjxkvqEtH79K2xIaeOcdzwgV6z/vbNkO67YwZUjHHRploZpCZZBa5twzPsl1KrE23DKOtleZ/V0oMg/FEWpBmhWHgX9JpwdFmRpn0luzw6PuSu/gfyDDUohBH7N/FJJcUnnl0V4Kah3G6/yq1CYakuKA0O0Y2g2liZmk2Rh1AMP2Zjzid0T+gT5frSL5v9BaGJ8j+FL6mHiKEQeYAfXX0p8DevMVmJsLYc0GxOgbEeIATEVJN0WCE4aL+FUv6F8j7mNUPIUc4uQ8uZokIo2JsaocinDpEbx0j75AU1CYFUYxfueAHBnZQzQ=="
+            )
+        )
+        patched, visible_report = bdj.patch_music_jukebox_idle_timer_keeps_playlist_visible(original)
+        self.assertEqual(visible_report["matches"], 1)
+        patched, graphics_report = bdj.patch_music_jukebox_idle_timer_restores_graphics_lookup(patched)
+        self.assertTrue(graphics_report["matches"] == 1 or graphics_report["already_patched"])
+        patched, incoming_report = bdj.patch_music_jukebox_idle_timer_draws_incoming_playlist(patched)
+        self.assertEqual(incoming_report["matches"], 1)
+        patched, repeat_report = bdj.patch_music_jukebox_idle_timer_repeats_playlist_redraw(patched)
+        self.assertEqual(repeat_report["matches"], 1)
+
+        entries, _ = bdj.parse_constant_pool(patched)
+        playlist_menu_class = bdj.find_cp_class(entries, "com/wb/bdj/menu/k")
+        is_visible = bdj.find_cp_methodref(entries, "com/wb/bdj/menu/k", "n", "()Z")
+        self.assertIn(
+            b"\x2b\xc0" + playlist_menu_class.to_bytes(2, "big")
+            + b"\xb6" + is_visible.to_bytes(2, "big")
+            + b"\x57\x00\x00",
+            patched,
+        )
+
+        second, second_report = bdj.patch_music_jukebox_idle_timer_draws_incoming_playlist(patched)
+        self.assertEqual(second, patched)
+        self.assertTrue(second_report["already_patched"])
+
+    def test_music_jukebox_menu_layer_patch_keeps_authored_group_separate(self) -> None:
         with TemporaryDirectory() as temp:
             prop = Path(temp) / "menu_base.prop"
             prop.write_text(
@@ -451,7 +834,7 @@ class BDJCompatibilityPatchTests(unittest.TestCase):
                         "the_music_revisited.playlistMenuId=jukebox_group",
                         "music_jukebox_popup.name=MusicJukeboxPopup",
                         "music_jukebox_popup.type=Menu",
-                        "music_jukebox_popup.children=jukebox_header_text,jukebox_exit",
+                        "music_jukebox_popup.children=jukebox_header_text,jukebox_exit,jukebox_group",
                         "jukebox_group.name=MusicJukeboxGroup",
                         "jukebox_group.type=RadioGroup",
                         "jukebox_group.children=jukebox_song01,jukebox_song02",
@@ -468,7 +851,8 @@ class BDJCompatibilityPatchTests(unittest.TestCase):
 
         self.assertTrue(report["patched"])
         self.assertTrue(backup_exists)
-        self.assertIn("music_jukebox_popup.children=jukebox_header_text,jukebox_exit,jukebox_group", text)
+        self.assertIn("music_jukebox_popup.children=jukebox_header_text,jukebox_exit", text)
+        self.assertNotIn("music_jukebox_popup.children=jukebox_header_text,jukebox_exit,jukebox_group", text)
         self.assertNotIn("jukebox_clear_back", text)
         self.assertNotIn("zIndex", text)
         self.assertFalse(second["patched"])
@@ -919,10 +1303,8 @@ class CopyPlanningTests(unittest.TestCase):
             clip_ids = {"00001"}
             clpi = Path(temp) / "00001.clpi"
             mpls = Path(temp) / "00001.mpls"
-            clpi.write_bytes(b"HDMV0200" + config.CLPI_PRIMARY_VIDEO_AVC + b"payload")
-            item_body = b"00001" + b"\x00" * 8 + config.MPLS_PRIMARY_VIDEO_AVC + b"payload"
-            playlist = (200).to_bytes(4, "big") + b"\x00\x00" + (1).to_bytes(2, "big") + b"\x00\x00" + len(item_body).to_bytes(2, "big") + item_body
-            mpls.write_bytes(b"MPLS0200" + (20).to_bytes(4, "big") + b"\x00" * 8 + playlist)
+            clpi.write_bytes(make_clpi())
+            mpls.write_bytes(make_mpls())
 
             clpi_report = navigation.patch_clpi_for_hevc(clpi)
             mpls_report = navigation.patch_mpls_for_hevc(mpls, clip_ids)
@@ -938,10 +1320,8 @@ class CopyPlanningTests(unittest.TestCase):
             clip_ids = {"00001"}
             clpi = Path(temp) / "00001.clpi"
             mpls = Path(temp) / "00001.mpls"
-            clpi.write_bytes(b"HDMV0200" + config.CLPI_PRIMARY_VIDEO_AVC + b"payload")
-            item_body = b"00001" + b"\x00" * 8 + config.MPLS_PRIMARY_VIDEO_AVC + b"payload"
-            playlist = (200).to_bytes(4, "big") + b"\x00\x00" + (1).to_bytes(2, "big") + b"\x00\x00" + len(item_body).to_bytes(2, "big") + item_body
-            mpls.write_bytes(b"MPLS0200" + (20).to_bytes(4, "big") + b"\x00" * 8 + playlist)
+            clpi.write_bytes(make_clpi())
+            mpls.write_bytes(make_mpls())
 
             clpi_report = navigation.patch_clpi_for_hevc(clpi, patch_version_headers=True)
             mpls_report = navigation.patch_mpls_for_hevc(mpls, clip_ids, patch_version_headers=True)
@@ -954,7 +1334,7 @@ class CopyPlanningTests(unittest.TestCase):
     def test_navigation_patch_handles_interlaced_avc_clpi_descriptor(self) -> None:
         with TemporaryDirectory() as temp:
             clpi = Path(temp) / "00024.clpi"
-            clpi.write_bytes(b"HDMV0200" + bytes.fromhex("001011151b4430") + b"payload")
+            clpi.write_bytes(make_clpi(format_rate=0x44))
 
             report = navigation.patch_clpi_for_hevc(clpi)
 
@@ -1070,6 +1450,38 @@ class CopyPlanningTests(unittest.TestCase):
         self.assertEqual(output.disc_title_from_folder_name("IT"), "IT")
         self.assertEqual(output.disc_title_from_folder_name("It"), "It")
         self.assertEqual(output.disc_title_from_folder_name("PRIDE_PREJUDICE_2005_film"), "Pride Prejudice 2005 Film")
+
+    def test_generated_output_name_preserves_source_spelling_and_optional_tags(self) -> None:
+        source_name = "Star Trek TNG - Season 1, Disc 1, Episodes 1-4"
+
+        self.assertEqual(
+            output.generated_output_name(source_name),
+            f"{source_name} (BD) (UHD converted)",
+        )
+        self.assertEqual(output.generated_output_name(source_name, add_tags=False), source_name)
+        self.assertEqual(
+            output.generated_output_name("MY_DISC (BD)"),
+            "MY_DISC (BD) (UHD converted)",
+        )
+        self.assertEqual(
+            output.generated_output_name("MY_DISC (BD) (UHD converted)"),
+            "MY_DISC (BD) (UHD converted)",
+        )
+
+    def test_generated_output_avoids_tag_free_source_collision(self) -> None:
+        with TemporaryDirectory() as temp:
+            parent = Path(temp)
+            source = parent / "Exact SOURCE Name"
+            source.mkdir()
+
+            self.assertEqual(
+                output.generated_output_for(source, parent / "converted", add_tags=False).name,
+                source.name,
+            )
+            self.assertEqual(
+                output.generated_output_for(source, parent, add_tags=False).name,
+                f"{source.name} HEVC",
+            )
 
     def test_preservation_copy_skips_only_reencoded_streams(self) -> None:
         with TemporaryDirectory() as temp:
@@ -1391,17 +1803,54 @@ class CommandConstructionTests(unittest.TestCase):
             self.assertTrue(patch_clpi.call_args.kwargs["patch_video_to_hevc"])
             self.assertEqual(backup_clpi.read_bytes(), output_clpi.read_bytes())
 
-    def test_main_title_cq_override_targets_longest_reencoded_clip(self) -> None:
+    def test_main_title_cq_override_falls_back_to_longest_reencoded_clip(self) -> None:
         clips = [
             {"file": "00001.m2ts", "action": "reencode", "duration": 30.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
             {"file": "00002.m2ts", "action": "reencode", "duration": 7200.0, "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}},
             {"file": "00003.m2ts", "action": "reencode", "duration": 8000.0, "video": {"target_hevc": {"rate_control": "vbr", "target_bps": 5_000_000}}},
         ]
         report = bd.apply_main_title_cq_override(clips, 18)
-        self.assertEqual(report["file"], "00003.m2ts")
+        self.assertEqual(report["selection"], "longest-physical-clip-fallback")
+        self.assertEqual(report["matched_count"], 1)
+        self.assertEqual(report["clips"][0]["file"], "00003.m2ts")
         self.assertEqual(clips[0]["video"]["target_hevc"]["cq"], 20)
         self.assertEqual(clips[1]["video"]["target_hevc"]["cq"], 20)
         self.assertEqual(clips[2]["video"]["target_hevc"]["cq"], 18)
+
+    def test_main_title_quality_targets_all_seamless_feature_clips(self) -> None:
+        clips = [
+            {"file": f"{number:05d}.m2ts", "action": "reencode", "duration": float(number * 100), "video": {"target_hevc": {"rate_control": "cq", "cq": 20}}}
+            for number in range(1, 6)
+        ]
+        feature = {
+            "primary_playlist": "00801",
+            "seamless_branching": True,
+            "clip_ids": ["00001", "00002", "00004"],
+            "playlists": [{"playlist": "00801"}, {"playlist": "00800"}],
+        }
+
+        report = bd.apply_main_title_quality_override(clips, "cq:18", {"mode": "compact-cq"}, feature)
+
+        self.assertEqual(report["selection"], "playlist-feature")
+        self.assertTrue(report["seamless_branching"])
+        self.assertEqual(report["playlists"], ["00801", "00800"])
+        self.assertEqual(report["matched_count"], 3)
+        self.assertEqual({item["file"] for item in report["clips"]}, {"00001.m2ts", "00002.m2ts", "00004.m2ts"})
+        self.assertEqual([clip["video"]["target_hevc"]["cq"] for clip in clips], [18, 18, 20, 18, 20])
+
+    def test_main_feature_selection_groups_related_branching_playlists(self) -> None:
+        catalog = [
+            {"playlist": "00801", "duration": 5400.0, "item_count": 4, "unique_clip_count": 4, "clip_ids": ["00001", "00002", "00003", "00004"], "seconds_by_clip": {"00001": 1500.0, "00002": 1200.0, "00003": 1500.0, "00004": 1200.0}},
+            {"playlist": "00800", "duration": 5100.0, "item_count": 4, "unique_clip_count": 4, "clip_ids": ["00001", "00012", "00003", "00014"], "seconds_by_clip": {"00001": 1500.0, "00012": 1050.0, "00003": 1500.0, "00014": 1050.0}},
+            {"playlist": "00201", "duration": 8000.0, "item_count": 100, "unique_clip_count": 1, "clip_ids": ["00201"] * 100, "seconds_by_clip": {"00201": 8000.0}},
+        ]
+        with mock.patch.object(navigation, "playlist_catalog", return_value=catalog):
+            selection = navigation.main_feature_selection(Path("disc"))
+
+        self.assertEqual(selection["primary_playlist"], "00801")
+        self.assertTrue(selection["seamless_branching"])
+        self.assertEqual({row["playlist"] for row in selection["playlists"]}, {"00800", "00801"})
+        self.assertEqual(set(selection["clip_ids"]), {"00001", "00002", "00003", "00004", "00012", "00014"})
 
     def test_top_n_cq_override_targets_longest_reencoded_clips(self) -> None:
         clips = [
@@ -2012,6 +2461,60 @@ class CommandConstructionTests(unittest.TestCase):
             self.assertGreaterEqual(attempts["count"], 2)
             self.assertEqual(queueing.load_job(path)["id"], "job-1")
 
+    def test_disk_full_failure_removes_new_partial_and_pauses_queue(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            output_path = root / "partial output"
+            output_path.mkdir()
+            (output_path / "partial.m2ts").write_bytes(b"partial")
+            log_path = root / "job.log"
+            log_path.write_text("OSError: [WinError 112] There is not enough space on the disk\n", encoding="utf-8")
+            job = {
+                "id": "disc-1",
+                "source": str(root / "source"),
+                "output": str(output_path),
+                "output_existed_at_queue": False,
+                "output_created_by_job": True,
+            }
+            with (
+                mock.patch.object(queueing, "DEFAULT_JOB_DIR", root),
+                mock.patch.object(queueing, "QUEUE_PAUSE_FILE", root / "queue.paused"),
+            ):
+                result = queueing.handle_disk_full_failure(job, log_path)
+
+                self.assertFalse(output_path.exists())
+                self.assertTrue(queueing.queue_is_paused())
+                self.assertIn("Output disk full", queueing.queue_pause_reason() or "")
+
+            self.assertEqual(result["failure_reason"], "output-disk-full")
+            self.assertTrue(result["partial_output_removed"])
+            self.assertTrue(result["queue_paused_on_failure"])
+
+    def test_disk_full_failure_never_removes_preexisting_output(self) -> None:
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            output_path = root / "existing output"
+            output_path.mkdir()
+            (output_path / "keep.txt").write_text("keep", encoding="utf-8")
+            log_path = root / "job.log"
+            log_path.write_text("No space left on device\n", encoding="utf-8")
+            job = {
+                "id": "disc-2",
+                "source": str(root / "source"),
+                "output": str(output_path),
+                "output_existed_at_queue": True,
+                "output_created_by_job": False,
+            }
+            with (
+                mock.patch.object(queueing, "DEFAULT_JOB_DIR", root),
+                mock.patch.object(queueing, "QUEUE_PAUSE_FILE", root / "queue.paused"),
+            ):
+                result = queueing.handle_disk_full_failure(job, log_path)
+
+            self.assertTrue((output_path / "keep.txt").exists())
+            self.assertFalse(result["partial_output_removed"])
+            self.assertIn("existed before", result["partial_output_cleanup_error"])
+
     def test_status_handles_job_before_progress_plan_exists(self) -> None:
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2207,6 +2710,30 @@ class CommandConstructionTests(unittest.TestCase):
 
 
 class LinuxCompatibilityTests(unittest.TestCase):
+    def test_runtime_encoder_probe_rejects_advertised_but_unusable_encoder(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["ffmpeg"],
+            1,
+            stdout="",
+            stderr="DLL amfrt64.dll failed to open",
+        )
+        discovered = {"ffmpeg": "ffmpeg", "hevc_encoders": ["hevc_amf"]}
+
+        with mock.patch.object(tools, "run_cmd", return_value=completed) as run:
+            with self.assertRaisesRegex(tools.ToolError, "runtime probe failed"):
+                tools.require_working_hevc_encoder(discovered, "hevc_amf")
+
+        command = run.call_args.args[0]
+        self.assertIn("hevc_amf", command)
+        self.assertIn("1920x1080", " ".join(command))
+
+    def test_runtime_encoder_probe_accepts_working_encoder(self) -> None:
+        completed = subprocess.CompletedProcess(["ffmpeg"], 0, stdout="", stderr="")
+        discovered = {"ffmpeg": "ffmpeg", "hevc_encoders": ["hevc_nvenc"]}
+
+        with mock.patch.object(tools, "run_cmd", return_value=completed):
+            tools.require_working_hevc_encoder(discovered, "hevc_nvenc")
+
     def test_posix_tool_discovery_ignores_windows_executables(self) -> None:
         def fake_which(name: str, *, path: str | None = None) -> str | None:
             native = {

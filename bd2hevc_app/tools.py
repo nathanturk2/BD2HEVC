@@ -7,8 +7,9 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import HARDWARE_HEVC_ENCODERS, HEVC_ENCODERS, LOCAL_FFMPEG_DIRS, LOCAL_TSMUXERS, MAKEMKV_DIRS, VLC_DIRS
 
@@ -143,6 +144,46 @@ def require_hevc_encoder(tools: dict[str, Any], encoder: str) -> None:
         raise ToolError(f"FFmpeg does not report requested HEVC encoder {encoder}. Available HEVC encoders: {available}.{hint}")
 
 
+def require_working_hevc_encoder(tools: dict[str, Any], encoder: str) -> None:
+    """Reject advertised hardware encoders whose runtime/driver is unavailable."""
+    require_hevc_encoder(tools, encoder)
+    if not encoder_is_hardware(encoder):
+        return
+    ffmpeg = require_tool(tools, "ffmpeg")
+    result = run_cmd(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=1920x1080:r=1",
+            "-frames:v",
+            "1",
+            "-an",
+            "-c:v",
+            encoder,
+            "-f",
+            "null",
+            "-",
+        ],
+        check=False,
+        capture=True,
+        timeout_seconds=15,
+    )
+    if result.returncode == 0:
+        return
+    detail = "\n".join((result.stderr or result.stdout or "").splitlines()[-8:]).strip()
+    suffix = f"\n{detail}" if detail else ""
+    raise ToolError(
+        f"FFmpeg reports {encoder}, but a one-frame runtime probe failed. "
+        "Choose an encoder supported by the installed GPU driver/runtime."
+        f"{suffix}"
+    )
+
+
 def run_cmd(
     cmd: list[str],
     *,
@@ -191,6 +232,32 @@ def run_cmd(
         tail = "\n".join((result.stderr or result.stdout or "").splitlines()[-40:])
         raise ToolError(f"Command failed ({result.returncode}): {format_cmd(cmd)}\n{tail}")
     return result
+
+
+def run_streaming_cmd(cmd: list[str], consume: Callable[[bytes], None]) -> subprocess.CompletedProcess[bytes]:
+    """Stream binary stdout while keeping stderr out of the pipe backpressure path."""
+    with tempfile.TemporaryFile() as diagnostics:
+        with subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=diagnostics,
+            **hidden_process_kwargs(),
+        ) as process:
+            try:
+                assert process.stdout is not None
+                for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
+                    consume(chunk)
+                returncode = process.wait()
+            finally:
+                # A parser error or cancellation must not leave FFmpeg blocked
+                # writing to a pipe that no one reads anymore.
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+        size = diagnostics.seek(0, os.SEEK_END)
+        diagnostics.seek(max(0, size - 64 * 1024))
+        return subprocess.CompletedProcess(cmd, returncode, b"", diagnostics.read())
 
 
 def format_cmd(cmd: list[str]) -> str:

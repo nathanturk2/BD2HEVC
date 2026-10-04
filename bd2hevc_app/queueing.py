@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -12,11 +13,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .locking import FileLock
 from .bitrate import safe_int
 from .config import (
     ANIME_CQ_VALUE,
     DEFAULT_ANIME_CQ_MIN_DURATION,
     DEFAULT_AUDIO_MODE,
+    DEFAULT_DEINTERLACE_MODE,
     DEFAULT_JOB_DIR,
     DEFAULT_MONO_AUDIO_BITRATE,
     DEFAULT_STEREO_AUDIO_BITRATE,
@@ -27,6 +30,15 @@ from .config import (
 )
 from .progress import WatchRenderer, progress_lines, read_text_flexible
 from .tools import ToolError, format_cmd, refreshed_env, selected_hevc_encoder
+
+
+DISK_FULL_LOG_MARKERS = (
+    "no space left on device",
+    "there is not enough space on the disk",
+    "[winerror 112]",
+    "errno 28",
+    "enospc",
+)
 
 
 def job_paths(job_id: str) -> dict[str, Path]:
@@ -58,7 +70,17 @@ def try_load_job(path: Path, *, attempts: int = 3, delay: float = 0.05) -> dict[
     return None
 
 
-def save_job(path: Path, job: dict[str, Any]) -> None:
+def save_job(path: Path, job: dict[str, Any], *, allow_cancel_reset: bool = False) -> None:
+    with FileLock(path.with_name(path.name + ".lock")):
+        previous = try_load_job(path, attempts=1) if path.exists() else None
+        if previous and previous.get("cancel_requested") and not allow_cancel_reset:
+            job["cancel_requested"] = True
+            job["status"] = "canceled"
+        job["revision"] = int((previous or {}).get("revision") or 0) + 1
+        _write_job(path, job)
+
+
+def _write_job(path: Path, job: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
@@ -160,6 +182,104 @@ def queue_is_paused() -> bool:
     return QUEUE_PAUSE_FILE.exists()
 
 
+def queue_pause_reason() -> str | None:
+    if not QUEUE_PAUSE_FILE.is_file():
+        return None
+    try:
+        payload = json.loads(read_text_flexible(QUEUE_PAUSE_FILE))
+    except (OSError, json.JSONDecodeError):
+        return None
+    reason = payload.get("reason")
+    return str(reason) if reason else None
+
+
+def set_queue_paused(reason: str | None = None) -> None:
+    DEFAULT_JOB_DIR.mkdir(parents=True, exist_ok=True)
+    QUEUE_PAUSE_FILE.write_text(
+        json.dumps({"paused_at": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": reason}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def log_tail_text(path: Path, *, max_bytes: int = 2 * 1024 * 1024) -> str:
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - max_bytes), os.SEEK_SET)
+            return stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def log_indicates_disk_full(path: Path) -> bool:
+    text = log_tail_text(path).casefold()
+    return any(marker in text for marker in DISK_FULL_LOG_MARKERS)
+
+
+def remove_new_partial_output(job: dict[str, Any]) -> tuple[bool, str | None]:
+    """Remove a failed job's newly created output, never a pre-existing target."""
+    created_by_job = job.get("output_created_by_job")
+    if created_by_job is False or (created_by_job is None and bool(job.get("output_existed_at_queue"))):
+        return False, "output existed before this job and was retained"
+    output_value = str(job.get("output") or "")
+    if not output_value:
+        return False, "job has no output path"
+    output = Path(output_value).expanduser()
+    source_value = str(job.get("source") or "")
+    source = Path(source_value).expanduser().resolve() if source_value else None
+    candidates = [output]
+    staging_value = str(job.get("staging_output") or "")
+    if staging_value:
+        staging = Path(staging_value).expanduser()
+        candidates.append(staging)
+    # Validate every target before deleting any of them, including staging.
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved == Path(resolved.anchor) or (source is not None and (
+            resolved == source or source in resolved.parents or resolved in source.parents
+        )):
+            return False, "refused unsafe partial-output path"
+    existing = [candidate for candidate in candidates if candidate.exists()]
+    if not existing:
+        return False, None
+    try:
+        for candidate in existing:
+            if candidate.is_dir():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+    except OSError as exc:
+        return False, str(exc)
+    return True, None
+
+
+def handle_disk_full_failure(job: dict[str, Any], log_path: Path) -> dict[str, Any]:
+    """Clean a new partial output and latch the queue after an ENOSPC failure."""
+    if not log_indicates_disk_full(log_path):
+        return job
+    removed, cleanup_error = remove_new_partial_output(job)
+    output = str(job.get("output") or "")
+    reason = f"Output disk full while converting {job.get('id') or Path(output).name}. Free space, then explicitly resume the queue."
+    set_queue_paused(reason)
+    job["failure_reason"] = "output-disk-full"
+    job["partial_output_removed"] = removed
+    job["queue_paused_on_failure"] = True
+    if cleanup_error:
+        job["partial_output_cleanup_error"] = cleanup_error
+    else:
+        job.pop("partial_output_cleanup_error", None)
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        if removed:
+            log.write(f"BD2HEVC removed incomplete output after disk-full failure: {output}\n")
+        elif cleanup_error:
+            log.write(f"BD2HEVC retained incomplete output after cleanup could not safely complete: {cleanup_error}\n")
+        else:
+            log.write("BD2HEVC found no partial output to remove after disk-full failure.\n")
+        log.write("BD2HEVC paused the queue. Free output space, then explicitly resume it.\n")
+    return job
+
+
 def process_creationflags(*, hidden: bool = True, detached: bool = False, new_group: bool = False) -> int:
     if os.name != "nt":
         return 0
@@ -232,6 +352,16 @@ def job_runtime_status(job: dict[str, Any]) -> str:
                     return "running"
         return status
     return str(job.get("status") or "unknown")
+
+
+def job_reserves_output(job: dict[str, Any]) -> bool:
+    """A live worker or recent producer owns its output; stale workers do not."""
+    status = str(job.get("status") or "").lower()
+    if status not in {"running", "queued", "paused"} or job_exit_code(job) is not None:
+        return False
+    if pid_is_running(safe_int(job.get("pid"))):
+        return True
+    return status == "queued" and not job.get("pid") and time.time() - float(job.get("queue_order") or 0) < 60
 
 
 def pid_is_running(pid: int | None) -> bool:
@@ -333,7 +463,7 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     copy_clips = flatten_cli_values(getattr(args, "copy_clips", None))
     if copy_clips:
         argv.extend(["--copy-clips", *copy_clips])
-    append_option(argv, "--deinterlace", getattr(args, "deinterlace", "off"), "off")
+    argv.extend(["--deinterlace", getattr(args, "deinterlace", DEFAULT_DEINTERLACE_MODE)])
     append_option(argv, "--deinterlace-filter", getattr(args, "deinterlace_filter", "bwdif"), "bwdif")
     deinterlace_clips = flatten_cli_values(getattr(args, "deinterlace_clips", None))
     if deinterlace_clips:
@@ -345,6 +475,10 @@ def auto_command_for_job(args: argparse.Namespace, output: Path, report_path: Pa
     append_option(argv, "--stereo-audio-bitrate", getattr(args, "stereo_audio_bitrate", DEFAULT_STEREO_AUDIO_BITRATE), DEFAULT_STEREO_AUDIO_BITRATE)
     append_option(argv, "--mono-audio-bitrate", getattr(args, "mono_audio_bitrate", DEFAULT_MONO_AUDIO_BITRATE), DEFAULT_MONO_AUDIO_BITRATE)
     append_option(argv, "--uhd-profile", getattr(args, "uhd_profile", "library"), "library")
+    append_option(argv, "--output-format", getattr(args, "output_format", "folder"), "folder")
+    append_option(argv, "--iso-author-tool", getattr(args, "iso_author_tool", None))
+    if getattr(args, "keep_iso_staging", False):
+        argv.append("--keep-iso-staging")
     append_option(argv, "--target-disc-size", getattr(args, "target_disc_size", None))
     append_option(argv, "--target-disc-margin", getattr(args, "target_disc_margin", 0.98), 0.98)
     append_option(argv, "--vlc-compat", getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE), DEFAULT_VLC_COMPATIBILITY_MODE)
@@ -393,7 +527,9 @@ def older_active_jobs(current_path: Path, current_job: dict[str, Any]) -> list[d
             continue
         if job_exit_code(job) is not None:
             continue
-        if pid_is_running(safe_int(job.get("pid"))):
+        status = str(job.get("status") or "").lower()
+        pending_start = status == "queued" and not job.get("pid") and time.time() - float(job.get("queue_order") or 0) < 60
+        if pid_is_running(safe_int(job.get("pid"))) or pending_start:
             active.append(job)
     active.sort(key=lambda item: float(item.get("queue_order") or 0))
     return active
@@ -452,6 +588,14 @@ def wait_for_queue_turn(job_path: Path, job: dict[str, Any], log: Any) -> dict[s
             continue
         blockers = older_active_jobs(job_path, job)
         if not blockers:
+            slot = FileLock(DEFAULT_JOB_DIR / "active-work.lock", timeout=0)
+            if not slot.acquire():
+                job["waiting_for"] = "active work slot"
+                save_job(job_path, job)
+                time.sleep(QUEUE_POLL_SECONDS)
+                continue
+            global _active_slot
+            _active_slot = slot
             job["status"] = "running"
             job["started_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             job.pop("waiting_for", None)
@@ -478,6 +622,8 @@ def cmd_run_job(args: argparse.Namespace) -> int:
     job["status"] = "queued"
     save_job(job_path, job)
     returncode = 1
+    global _active_slot
+    _active_slot = None
     try:
         with log_path.open("a", encoding="utf-8", errors="replace") as log:
             log.write(f"BD2HEVC job {job['id']} queued at {job.get('queued_at') or job.get('created_at')}\n")
@@ -488,10 +634,13 @@ def cmd_run_job(args: argparse.Namespace) -> int:
                 log.write(f"BD2HEVC job {job['id']} started at {job['started_at']}\n")
                 log.write("Command: " + format_cmd(job["command"]) + "\n\n")
                 log.flush()
+                worker_env = refreshed_env()
+                if _active_slot is not None:
+                    worker_env["BD2HEVC_WORK_TOKEN"] = _active_slot.token
                 proc = subprocess.run(
                     job["command"],
                     cwd=str(ROOT),
-                    env=refreshed_env(),
+                    env=worker_env,
                     text=True,
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -503,6 +652,12 @@ def cmd_run_job(args: argparse.Namespace) -> int:
         with log_path.open("a", encoding="utf-8", errors="replace") as log:
             log.write(f"\nBD2HEVC job failed before completion: {exc}\n")
         returncode = 1
+    finally:
+        if _active_slot is not None:
+            _active_slot.release()
+            _active_slot = None
+    if returncode not in (0, 130):
+        job = handle_disk_full_failure(job, log_path)
     exit_path.write_text(str(returncode), encoding="utf-8")
     job["status"] = "completed" if returncode == 0 else ("canceled" if returncode == 130 else "failed")
     job["exitcode"] = str(exit_path)
@@ -667,11 +822,7 @@ def cmd_jobs(args: argparse.Namespace) -> int:
 
 
 def cmd_pause_queue(args: argparse.Namespace) -> int:
-    DEFAULT_JOB_DIR.mkdir(parents=True, exist_ok=True)
-    QUEUE_PAUSE_FILE.write_text(
-        json.dumps({"paused_at": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": args.reason}, indent=2),
-        encoding="utf-8",
-    )
+    set_queue_paused(getattr(args, "reason", None))
     print("BD2HEVC queue paused. The current running job continues; queued jobs will wait.")
     print("Resume with: python bd2hevc.py resume-queue")
     return 0

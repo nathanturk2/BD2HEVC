@@ -16,6 +16,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from .runtime_support import publish_file, read_log_tail, reject_overlap, swap_directory
+
 from .config import DEFAULT_REPORT_DIR, ROOT, VERSION
 from .progress import read_text_flexible
 from .queueing import find_job, job_runtime_status
@@ -46,6 +48,11 @@ def path_variants(path: Path) -> list[str]:
     except OSError:
         pass
     values.add(path.as_posix())
+    values.update(value.replace("\\", "/") for value in tuple(values))
+    for value in tuple(values):
+        if re.match(r"^[A-Za-z]:/", value):
+            values.add("/mnt/" + value[0].lower() + value[2:])
+    values.update(json.dumps(value)[1:-1] for value in tuple(values))
     return sorted((value for value in values if value), key=len, reverse=True)
 
 
@@ -142,7 +149,7 @@ def summarize_disc_tree(path: Path) -> dict[str, Any]:
 
 
 def tail_text(path: Path, lines: int) -> str:
-    text = read_text_flexible(path)
+    text = read_log_tail(path, max_lines) if max_lines else read_text_flexible(path)
     if lines <= 0:
         return text
     split = text.splitlines()
@@ -254,7 +261,7 @@ def write_log_highlights(path: Path, destination: Path, mapping: dict[str, str],
     if not path.exists():
         return False
     matches: list[str] = []
-    for line in read_text_flexible(path).splitlines():
+    for line in read_log_tail(path, 20000).splitlines():
         stripped = line.strip()
         if not stripped or "BD2HEVC_PROGRESS" in stripped:
             continue
@@ -301,6 +308,7 @@ def create_diagnostic_bundle(
     log_lines: int = DEFAULT_DIAGNOSTIC_LOG_LINES,
     run_validation: bool = True,
     zip_output: bool = True,
+    force: bool = False,
 ) -> dict[str, Any]:
     target = target.resolve()
     source = source.resolve() if source else None
@@ -374,24 +382,39 @@ def create_diagnostic_bundle(
             diagnostic["validation"] = run_light_validation(target, source, mapping)
 
         (workdir / "diagnostic.json").write_text(json.dumps(diagnostic, indent=2), encoding="utf-8")
-        if zip_output:
+        protected = [target] + ([source] if source else [])
+        if job:
+            protected.extend(Path(str(job[key])) for key in ("source", "output", "job_file", "log", "plan", "report") if job.get(key))
+        try:
+            reject_overlap(output, protected)
+            if output.exists() and not force:
+                raise ToolError(f"Diagnostic output exists: {output}. Use --force to replace the bundle.")
             output.parent.mkdir(parents=True, exist_ok=True)
-            if output.exists():
-                output.unlink()
-            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for path in sorted(workdir.rglob("*")):
-                    if path.is_file():
-                        archive.write(path, path.relative_to(workdir).as_posix())
+            if zip_output:
+                import uuid
+                temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
+                try:
+                    with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                        for path in sorted(workdir.rglob("*")):
+                            if path.is_file():
+                                archive.write(path, path.relative_to(workdir).as_posix())
+                    publish_file(temporary, output, force=force)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            else:
+                with tempfile.TemporaryDirectory(prefix=".diagnostic-", dir=output.parent) as parent:
+                    temporary = Path(parent) / "bundle"
+                    # Directory publication requires direct siblings.
+                    staged = output.with_name(f".diagnostic-{Path(parent).name}-bundle")
+                    try:
+                        shutil.copytree(workdir, staged)
+                        swap_directory(staged, output, force=force)
+                    finally:
+                        if staged.exists():
+                            shutil.rmtree(staged)
             bundle_path = output
-        else:
-            if output.exists():
-                if output.is_dir():
-                    shutil.rmtree(output)
-                else:
-                    output.unlink()
-            output.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(workdir, output)
-            bundle_path = output
+        except (ValueError, FileExistsError) as exc:
+            raise ToolError(str(exc)) from exc
 
     return {
         "ok": True,
@@ -411,6 +434,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         log_lines=args.log_lines,
         run_validation=not args.no_validation,
         zip_output=not args.no_zip,
+        force=getattr(args, "force", False),
     )
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2))

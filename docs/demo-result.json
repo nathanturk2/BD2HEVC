@@ -1,0 +1,13 @@
+{
+  "generated_media": true,
+  "project": "BD2HEVC",
+  "encoder": "libx265",
+  "duration_seconds": 16,
+  "source_bytes": 11104248,
+  "output_bytes": 8404992,
+  "elapsed_seconds": 11.75,
+  "outcome": "passed",
+  "version": "0.2.0a2",
+  "date": "2026-10-05",
+  "output_format": "iso"
+}

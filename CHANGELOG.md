@@ -1,7 +1,62 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.2.0a2 — GUI source update
 
+- Prepare the Windows GUI, queues, watched folders, presets, folder/ISO output and diagnostics for the public update.
+- Preserve secondary audio roles when muxing, including DD+ stream/PID handling.
+- Keep complete failed replacement validation reports outside discarded staging.
+- Retain source/output stream inventories in audio validation diagnostics.
+
+
+## 0.2.0a1 — Release candidate
+
+- Hardened diagnostic output, queue coordination, folder/repair publication and scan/track validation.
+- Verify authored ISO payload hashes before removing staging; optional reference/checksum verification.
+- Complete source/wheel resources and writable per-user state, with legacy-state migration.
+
+## Earlier alpha development
+
+- Fixed Windows ISO mounting: the bundled UDF writer now emits the logical
+  volume character set and complete terminating-descriptor CRC. Independent
+  descriptor checks run before publishing or accepting authored images.
+- Reconcile CLPI and MPLS video metadata against measured output streams,
+  including VC-1 sources, deinterlacing, resolution, frame rate and known colour
+  information. Preserve measured source colour fields in encoder commands.
+- Added size-preserving, journalled repairs for existing converted ISOs and
+  folder navigation files; see `docs/BACKUP_REPAIR.md`.
+
+- Auto deinterlacing is now the GUI and CLI default for reencoded clips flagged
+  as interlaced. Off remains available; queued commands, saved presets, and
+  completed conversion reports retain the selected deinterlacing mode.
+- Replaced the failed Matrix jukebox trials for the recognized 41-song edition
+  with ordered menu entry, persistent controls, and six independent playlists
+  that avoid VLC's corrupting VC-1 seek path. Preserves all original media and
+  restores recognized legacy class changes from verified backups.
+- Added optional verified UDF 2.50 Blu-ray ISO output to the GUI, foreground
+  conversion, background queue, and watched batches. Added standalone
+  `author-iso` and `verify-iso` commands, resumable ISO staging, storage checks,
+  and an ISO authoring progress phase.
+- The bundled UDF author now overlaps one sequential source reader with one
+  sequential destination writer, uses NTFS sparse staging to avoid writing
+  temporary zero-filled image gaps, preserves the declared final volume size,
+  and emits true source-payload progress for preallocated/sparse images.
+- Disk-full conversion failures now remove only newly created partial outputs
+  and automatically latch the background queue in a paused state. The GUI
+  displays the storage-related pause reason; conversion resumes only after the
+  user frees space and explicitly resumes the queue.
+- Automatic GUI, folder-queue, and watched-batch output names now preserve
+  the source backup folder's spelling and capitalization exactly. Optional
+  `(BD)` and `(UHD converted)` tags are appended without normalizing the name,
+  and CLI folder queues support `--no-output-tags`.
+- Added a full Windows GUI for conversion planning, playlist/clip inspection,
+  per-clip controls, presets, persistent watched folders, FIFO queue control,
+  monotonic video/audio/mux progress, validation, repair, diagnostics, and VLC
+  playback. The GUI uses hidden worker processes and includes an icon-bearing
+  launcher plus Desktop-shortcut installer.
+- Main-feature quality overrides are now MPLS-aware. Closely related
+  feature-length seamless branches are grouped, all physical clips unique to
+  either cut receive the override, and common clips remain encoded once and
+  shared by the original playlists.
 - Prepared initial public release metadata and GPL-3.0-only licensing.
 - Documented Windows and Linux platform support, including WSL with native
   Linux media tools.
@@ -62,12 +117,12 @@
   `patch-vlc-compat` for existing outputs.
 - Added the `music-jukebox-queued-state` VLC compatibility fix for matching
   Warner-style BD-J music jukebox menus, including faithful previous-menu
-  cleanup, authored track-group layering for matching extracted menu resources,
-  and null-focus recovery before the disc's original playback helper runs.
-- Hardened the Warner music-jukebox fix so the authored playlist group is
-  attached to the popup instance, the queued state change completes before
-  default-track focus is restored, and stale startup playback is stopped. The
-  patch can also upgrade outputs made by earlier versions of the fix.
+  cleanup, authored popup/track-group layering, and null-focus recovery before
+  the disc's original playback helper runs.
+- Corrected the Warner music-jukebox hardening so the authored playlist group
+  remains a separate layer and default-track focus is established before the
+  queued state change. The patch upgrades outputs made by the older attached-
+  group/post-state-focus variant automatically.
 - Generalized the validated BD-J top-menu compatibility fix so auto mode
   applies it only when the matching BD-J wrapper signature is present.
 - Added compact audio mode with AC-3 stereo/mono output for storage-limited

@@ -10,6 +10,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from .runtime_support import read_log_tail, read_progress_log
 from typing import Any
 
 from .bitrate import format_duration, parse_timecode, safe_float, safe_int
@@ -69,7 +70,7 @@ def read_text_flexible(path: Path) -> str:
 def latest_log_progress(log_path: Path) -> dict[str, Any]:
     if not log_path.exists():
         return {}
-    text = read_text_flexible(log_path)
+    text = read_progress_log(log_path, "BD2HEVC_PROGRESS ")
     marker_pattern = re.compile(r"(?:^|[\r\n])BD2HEVC_PROGRESS[^\S\r\n]+(\S+)[^\S\r\n]+(\S+)(?:[^\S\r\n]+([^\r\n]*))?", re.MULTILINE)
     markers = list(marker_pattern.finditer(text))
     if markers:
@@ -80,8 +81,12 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
         encoded_done: list[str] = []
         audio_done: set[str] = set()
         mux_done: set[str] = set()
+        audio_remux_starts: dict[str, re.Match[str]] = {}
+        audio_remux_done: set[str] = set()
         validate_done: list[str] = []
         pipeline_mode = None
+        iso_author_started = False
+        iso_author_done = False
         for marker in markers:
             event, clip_file, rest = marker.group(1), marker.group(2), marker.group(3) or ""
             if event == "pipeline":
@@ -99,6 +104,11 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
                 audio_done.discard(clip_file)
             elif event in {"audio-done", "audio-failed"}:
                 audio_done.add(clip_file)
+            elif event == "audio-remux-start":
+                audio_remux_starts[clip_file] = marker
+                audio_remux_done.discard(clip_file)
+            elif event in {"audio-remux-done", "audio-remux-failed"}:
+                audio_remux_done.add(clip_file)
             elif event == "mux-start":
                 mux_starts[clip_file] = marker
                 mux_done.discard(clip_file)
@@ -107,9 +117,16 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
             elif event == "validate-done":
                 validate_done.append(clip_file)
                 mux_done.add(clip_file)
+            elif event == "iso-author-start":
+                iso_author_started = True
+                iso_author_done = False
+            elif event == "iso-author-done":
+                iso_author_started = True
+                iso_author_done = True
         active_encode = next((clip for clip, marker in sorted(encode_starts.items(), key=lambda item: item[1].start(), reverse=True) if clip not in encode_done), None)
         active_audio = next((clip for clip, marker in sorted(audio_starts.items(), key=lambda item: item[1].start(), reverse=True) if clip not in audio_done), None)
         active_mux = next((clip for clip, marker in sorted(mux_starts.items(), key=lambda item: item[1].start(), reverse=True) if clip not in mux_done), None)
+        active_audio_remux = next((clip for clip, marker in sorted(audio_remux_starts.items(), key=lambda item: item[1].start(), reverse=True) if clip not in audio_remux_done), None)
 
         def marker_segment(start_event: str, clip_file: str | None, done_events: set[str]) -> str:
             if not clip_file:
@@ -138,10 +155,14 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
         stage_parts = []
         if active_mux:
             stage_parts.append("muxing")
+        if active_audio_remux:
+            stage_parts.append("audio remux")
         if active_audio:
             stage_parts.append("audio")
         if active_encode:
             stage_parts.append("encoding")
+        if iso_author_started and not iso_author_done:
+            stage_parts.append("authoring UDF 2.50 ISO")
         current_stage = " + ".join(stage_parts) if stage_parts else None
         return {
             "current_file": active_mux or active_audio or active_encode,
@@ -157,8 +178,14 @@ def latest_log_progress(log_path: Path) -> dict[str, Any]:
             "encode_seconds": encode_seconds,
             "encode_speed": encode_speed,
             "encoded_files": encoded_done,
+            "audio_done_files": sorted(audio_done),
+            "audio_remux_file": active_audio_remux,
+            "audio_remux_done_files": sorted(audio_remux_done),
+            "mux_done_files": sorted(mux_done),
             "done_files": list(dict.fromkeys(validate_done or sorted(mux_done))),
             "pipeline": pipeline_mode,
+            "iso_author_started": iso_author_started,
+            "iso_author_done": iso_author_done,
         }
     inputs = list(re.finditer(r"from '([^']+?([0-9]{5}\.m2ts))'", text))
     done_files: list[str] = []

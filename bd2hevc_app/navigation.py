@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import json
 from pathlib import Path
+from .paths import REPORT_ROOT, STATE_ROOT
 from typing import Any
 
 from .config import (
@@ -20,6 +21,7 @@ from .config import (
 from .muxing import write_tsmuxer_meta
 from .scan import inspect_clip
 from .tools import ToolError, require_tool, run_cmd
+from .video_navigation import clpi_video_entries, mpls_video_entries, probe_video, reconcile_clpi, reconcile_mpls
 
 def read_be16(data: bytes | bytearray, offset: int) -> int:
     return int.from_bytes(data[offset : offset + 2], "big")
@@ -75,6 +77,121 @@ def parse_mpls_play_items(path: Path) -> list[dict[str, Any]]:
         )
         pos = item_end
     return items
+
+
+def playlist_catalog(disc_root: Path, *, known_clip_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    """Return useful MPLS topology without invoking MakeMKV or libbluray.
+
+    Blu-ray feature playlists commonly reuse physical clips, and seamless
+    branching represents alternate cuts by substituting only the differing
+    clips.  Keeping this lightweight parser beside the existing MPLS parser
+    lets planning and the GUI reason about that topology before conversion.
+    """
+    playlist_dir = disc_root / "BDMV" / "PLAYLIST"
+    if not playlist_dir.is_dir():
+        return []
+    rows: list[dict[str, Any]] = []
+    for playlist in sorted(playlist_dir.glob("*.mpls")):
+        items = parse_mpls_play_items(playlist)
+        usable = [
+            item
+            for item in items
+            if item.get("clip_id")
+            and item.get("duration") is not None
+            and float(item.get("duration") or 0) > 0
+            and (known_clip_ids is None or str(item.get("clip_id")) in known_clip_ids)
+        ]
+        if not usable:
+            continue
+        seconds_by_clip: dict[str, float] = {}
+        for item in usable:
+            clip_id = str(item["clip_id"])
+            seconds_by_clip[clip_id] = seconds_by_clip.get(clip_id, 0.0) + float(item["duration"])
+        total_seconds = sum(float(item["duration"]) for item in usable)
+        rows.append(
+            {
+                "playlist": playlist.stem,
+                "path": str(playlist),
+                "duration": total_seconds,
+                "item_count": len(usable),
+                "unique_clip_count": len(seconds_by_clip),
+                "clip_ids": [str(item["clip_id"]) for item in usable],
+                "seconds_by_clip": seconds_by_clip,
+            }
+        )
+    return rows
+
+
+def main_feature_selection(
+    disc_root: Path,
+    *,
+    known_clip_ids: set[str] | None = None,
+    minimum_seconds: float = 20 * 60,
+) -> dict[str, Any] | None:
+    """Select the main playlist and closely related seamless-branched cuts.
+
+    Menu/gallery playlists often repeat one tiny clip hundreds of times. They
+    are excluded by the unique-item ratio before duration ranking. Alternate
+    cuts are grouped only when they are feature-length peers and at least 45%
+    of the shorter playlist is physically shared with the primary playlist.
+    This intentionally favours a small, explainable union over guessing that
+    every long playlist on a disc is another version of the movie.
+    """
+    catalog = playlist_catalog(disc_root, known_clip_ids=known_clip_ids)
+    candidates = [
+        row
+        for row in catalog
+        if float(row.get("duration") or 0) >= minimum_seconds
+        and (
+            int(row.get("item_count") or 0) <= 10
+            or int(row.get("unique_clip_count") or 0) / max(1, int(row.get("item_count") or 0)) >= 0.35
+        )
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda row: (
+            float(row.get("duration") or 0),
+            int(row.get("unique_clip_count") or 0),
+            str(row.get("playlist") or ""),
+        ),
+        reverse=True,
+    )
+    primary = candidates[0]
+    primary_seconds = dict(primary.get("seconds_by_clip") or {})
+    selected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        candidate_duration = float(candidate.get("duration") or 0)
+        if candidate is not primary and candidate_duration < float(primary["duration"]) * 0.75:
+            continue
+        candidate_seconds = dict(candidate.get("seconds_by_clip") or {})
+        shared_seconds = sum(
+            min(float(seconds), float(candidate_seconds.get(clip_id, 0.0)))
+            for clip_id, seconds in primary_seconds.items()
+        )
+        shorter_duration = min(float(primary["duration"]), candidate_duration)
+        shared_ratio = shared_seconds / shorter_duration if shorter_duration else 0.0
+        if candidate is primary or shared_ratio >= 0.45:
+            selected.append(
+                {
+                    "playlist": candidate["playlist"],
+                    "duration": candidate_duration,
+                    "item_count": candidate["item_count"],
+                    "unique_clip_count": candidate["unique_clip_count"],
+                    "shared_seconds": shared_seconds,
+                    "shared_ratio": shared_ratio,
+                    "clip_ids": list(candidate.get("clip_ids") or []),
+                }
+            )
+    clip_ids = sorted({clip_id for row in selected for clip_id in row.get("clip_ids") or []})
+    return {
+        "method": "longest-playlist-with-shared-feature-branches",
+        "primary_playlist": primary["playlist"],
+        "primary_duration": float(primary["duration"]),
+        "playlists": selected,
+        "clip_ids": clip_ids,
+        "seamless_branching": len({tuple(row.get("clip_ids") or []) for row in selected}) > 1,
+    }
 
 
 def short_repeated_playitem_clips(disc_root: Path, clip_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
@@ -152,6 +269,7 @@ def patch_clpi_for_output(
     patch_video_to_hevc: bool,
     compact_audio: bool = False,
     patch_version_headers: bool = False,
+    video_descriptors: dict[int, dict] | None = None,
 ) -> dict[str, Any]:
     if not path.exists():
         return {"file": str(path), "exists": False, "patched": False}
@@ -161,7 +279,8 @@ def patch_clpi_for_output(
     if patch_version_headers and data.startswith(b"HDMV0200"):
         data[4:8] = b"0300"
         version_changed = True
-    stream_patches = patch_clpi_primary_video_descriptors(data) if patch_video_to_hevc else 0
+    stream_patches = (reconcile_clpi(data, video_descriptors) if video_descriptors is not None
+                      else patch_clpi_primary_video_descriptors(data) if patch_video_to_hevc else 0)
     audio_patches = patch_clpi_audio_descriptors(data) if compact_audio else 0
     if data != original:
         path.write_bytes(data)
@@ -176,16 +295,10 @@ def patch_clpi_for_output(
 
 
 def patch_clpi_primary_video_descriptors(data: bytearray) -> int:
-    patches = 0
-    prefix = CLPI_PRIMARY_VIDEO_HEVC[:4]
-    for index in range(0, max(0, len(data) - len(prefix) - 1)):
-        if data[index : index + len(prefix)] != prefix:
-            continue
-        if data[index + len(prefix)] not in (CLPI_PRIMARY_VIDEO_AVC[4], CLPI_PRIMARY_VIDEO_MPEG2[4]):
-            continue
-        data[index + len(prefix)] = CLPI_PRIMARY_VIDEO_HEVC[4]
-        patches += 1
-    return patches
+    # Match the actual program table, including VC-1. A byte-pattern search
+    # misses legitimate descriptors and can change unrelated extension data.
+    entries = list(clpi_video_entries(data))
+    return reconcile_clpi(data, {pid: {"codec": 0x24} for pid, _, _ in entries if pid == 0x1011})
 
 
 def clpi_offsets(data: bytes | bytearray) -> dict[str, int]:
@@ -597,7 +710,7 @@ def splice_clpi_cpi_block(target_clpi: Path, generated_clpi: Path) -> dict[str, 
 
 def generate_clpi_for_m2ts(output_clip: Path, tools: dict[str, Any], *, verbose: bool = False) -> dict[str, Any]:
     tsmuxer = require_tool(tools, "tsmuxer")
-    work_parent = ROOT / "work"
+    work_parent = STATE_ROOT / "work"
     work_parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=f"{output_clip.stem}_clpi_", dir=work_parent) as tmp:
         tmp_root = Path(tmp)
@@ -665,6 +778,7 @@ def patch_mpls_for_hevc(
     *,
     compact_audio_clip_ids: set[str] | None = None,
     patch_version_headers: bool = False,
+    clip_video_descriptors: dict[str, dict[int, dict]] | None = None,
 ) -> dict[str, Any]:
     if not path.exists():
         return {"file": str(path), "exists": False, "patched": False}
@@ -675,6 +789,12 @@ def patch_mpls_for_hevc(
     stream_patches = 0
     audio_patches = 0
     compact_audio_clip_ids = compact_audio_clip_ids or set()
+    if clip_ids:
+        entries = list(mpls_video_entries(data))
+        measured = clip_video_descriptors if clip_video_descriptors is not None else {
+            clip: {0x1011: {"codec": 0x24}} for clip in clip_ids
+        }
+        stream_patches = reconcile_mpls(data, measured)
     if data.startswith(b"MPLS") and len(data) >= 20:
         playlist_start = read_be32(data, 8)
         if 0 <= playlist_start + 10 <= len(data):
@@ -690,8 +810,6 @@ def patch_mpls_for_hevc(
                 clip_id = data[pos + 2 : pos + 7].decode("ascii", errors="ignore") if pos + 7 <= item_end else ""
                 if clip_id in clip_ids:
                     matched_clips.append(clip_id)
-                    for source_pattern in (MPLS_PRIMARY_VIDEO_AVC, MPLS_PRIMARY_VIDEO_MPEG2):
-                        stream_patches += replace_in_range(data, pos, item_end, source_pattern, MPLS_PRIMARY_VIDEO_HEVC)
                 if clip_id in compact_audio_clip_ids:
                     compact_audio_matched_clips.append(clip_id)
                     audio_patches += patch_mpls_audio_descriptors(data, pos, item_end)
@@ -727,6 +845,8 @@ def patch_navigation_for_hevc(
     compact_audio_ids = {Path(name).stem for name in (compact_audio_clip_files or [])}
     patched_clip_ids = clip_ids | compact_audio_ids
     bdmv = disc_root / "BDMV"
+    measured = ({clip_id: probe_video(bdmv / "STREAM" / f"{clip_id}.m2ts", tools)
+                 for clip_id in sorted(clip_ids)} if tools else None)
     actual_spn_candidates = short_repeated_playitem_clips(disc_root, clip_ids)
     report: dict[str, Any] = {
         "clips": sorted(clip_ids),
@@ -751,6 +871,7 @@ def patch_navigation_for_hevc(
                     prefer_actual_keyframe_spns=clip_id in actual_spn_candidates,
                     patch_video_to_hevc=clip_id in clip_ids,
                     compact_audio=clip_id in compact_audio_ids,
+                    video_descriptors=measured.get(clip_id) if measured is not None else None,
                 )
             else:
                 item = patch_clpi_for_output(
@@ -758,6 +879,7 @@ def patch_navigation_for_hevc(
                     patch_video_to_hevc=clip_id in clip_ids,
                     compact_audio=clip_id in compact_audio_ids,
                     patch_version_headers=patch_version_headers,
+                    video_descriptors=measured.get(clip_id) if measured is not None else None,
                 )
             if refresh_cpi and tools and clpi_path.exists():
                 stream_path = bdmv / "STREAM" / f"{clip_id}.m2ts"
@@ -776,6 +898,7 @@ def patch_navigation_for_hevc(
                 clip_ids,
                 compact_audio_clip_ids=compact_audio_ids,
                 patch_version_headers=patch_version_headers,
+                clip_video_descriptors=measured,
             )
             if result.get("matched_clips") or result.get("compact_audio_matched_clips") or result.get("patched"):
                 report["mpls"].append(result)
@@ -806,10 +929,13 @@ def restore_source_clpi(
     prefer_actual_keyframe_spns: bool = False,
     patch_video_to_hevc: bool = True,
     compact_audio: bool = False,
+    video_descriptors: dict[int, dict] | None = None,
 ) -> dict[str, Any]:
     source_clpi = source_clpi_for_stream(source_clip)
     if not source_clpi.exists():
         return {"source_clpi": str(source_clpi), "output_clpi": str(output_clpi), "restored": False, "missing": True}
+    if video_descriptors is None and tools and output_clip and output_clip.is_file() and patch_video_to_hevc:
+        video_descriptors = probe_video(output_clip, tools)
     output_clpi.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_clpi, output_clpi)
     patch_result = patch_clpi_for_output(
@@ -817,6 +943,7 @@ def restore_source_clpi(
         patch_video_to_hevc=patch_video_to_hevc,
         compact_audio=compact_audio,
         patch_version_headers=patch_version_headers,
+        video_descriptors=video_descriptors,
     )
     cpi_scale = None
     if output_clip:

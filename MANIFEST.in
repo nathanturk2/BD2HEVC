@@ -1,0 +1,18 @@
+include README.md LICENSE THIRD_PARTY_NOTICES.md setup.py .gitattributes
+recursive-include assets *
+recursive-include docs *.md *.json *.png *.jpg
+recursive-include bd2hevc_app/data *
+recursive-include examples *.json
+recursive-include tools/hadris-udf *.rs *.toml *.orig *.lock *.md *.exe
+recursive-include tools/wb-jukebox *.java *.py
+include tools/*Launcher.cs tools/build-gui-icon.py tools/build-gui-launcher.ps1 tools/install-gui-shortcut.ps1
+global-exclude __pycache__ *.pyc *.obj *.log *.iso *.m2ts *.vob
+prune work
+prune reports
+
+include tools/*.py tools/*.pyw
+recursive-include tools/hadris-udf LICENSE* BUILD-PROVENANCE.json
+recursive-include .github *.yml *.yaml
+recursive-include tests *.py
+recursive-include scripts *.py *.ps1 *.sh
+include SHARED_MODULES.json SOURCE-MANIFEST.json

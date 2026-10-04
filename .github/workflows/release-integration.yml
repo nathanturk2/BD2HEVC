@@ -1,0 +1,32 @@
+name: Real-tool release integration
+on:
+  workflow_dispatch:
+    inputs:
+      encoder:
+        description: Encoder to release-test on this prepared runner
+        type: choice
+        options: [libx265, hevc_nvenc, hevc_qsv, hevc_amf]
+        default: libx265
+jobs:
+  generated-disc:
+    runs-on: [self-hosted, Windows, X64, hevc-release]
+    timeout-minutes: 60
+    env:
+      DEMO_ENCODER: ${{ inputs.encoder }}
+      BD2HEVC_STATE_DIR: ${{ runner.temp }}/hevc-release-state
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m pip install .
+
+      - name: Convert generated backup with installed external tools
+        shell: pwsh
+        run: |
+          $demo = Join-Path $env:RUNNER_TEMP ("hevc-demo-" + [guid]::NewGuid())
+          $demo | Set-Content demo-directory.txt
+          python tools/make-demo.py $demo --convert --encoder $env:DEMO_ENCODER
+          if ($LASTEXITCODE -ne 0) { throw "Generated-disc conversion failed; inspect the runner's demo logs" }
+          Copy-Item -LiteralPath (Join-Path $demo "demo-result.json") -Destination demo-result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generated-disc-receipt
+          path: demo-result.json

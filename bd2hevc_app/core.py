@@ -30,6 +30,8 @@ from .bdj import (
     patch_bluray_vlc_menu,
     patch_known_bdj_compatibility,
 )
+from .locking import FileLock, inherited_work_slot
+from .runtime_support import swap_directory
 from .bitrate import (
     bitrate_options_from_args,
     equivalent_hevc_bitrate,
@@ -52,9 +54,11 @@ from .config import (
     DEINTERLACE_MODES,
     DEFAULT_ANIME_CQ_MIN_DURATION,
     DEFAULT_AUDIO_MODE,
+    DEFAULT_DEINTERLACE_MODE,
     DEFAULT_MAKEMKV_TIMEOUT_SECONDS,
     DEFAULT_MONO_AUDIO_BITRATE,
     DEFAULT_REPORT_DIR,
+    DEFAULT_JOB_DIR,
     DEFAULT_STEREO_AUDIO_BITRATE,
     DEFAULT_VLC_COMPATIBILITY_MODE,
     HEVC_ENCODERS,
@@ -74,6 +78,7 @@ from .config import (
 from .diagnostics import DEFAULT_DIAGNOSTIC_LOG_LINES, cmd_diagnose
 from .encoding import compact_audio_source_streams, encode_to_hevc_m2ts, transcode_compact_audio_tracks
 from .libbluray_record import create_libbluray_recording, isolated_bdj_storage_env, libbluray_debug_env
+from .iso import author_bluray_iso, find_udf_tool, iso_output_path, iso_staging_path, verify_bluray_iso
 from .muxing import (
     author_m2ts_split,
     author_uhdbd_split,
@@ -81,6 +86,7 @@ from .muxing import (
     write_tsmuxer_meta,
 )
 from .navigation import (
+    main_feature_selection,
     patch_clpi_for_output,
     patch_navigation_for_hevc,
     restore_source_clpi,
@@ -90,12 +96,13 @@ from .output import (
     conversion_succeeded,
     copy_disc_tree_skipping_reencoded_streams,
     default_output_for,
-    disc_title_from_folder_name,
     ensure_disc_library_metadata,
+    generated_output_for,
     make_output_available,
     path_or_none,
     print_conversion_summary,
     safe_name,
+    validate_output_available,
 )
 from .progress import (
     cmd_progress,
@@ -121,6 +128,8 @@ from .queueing import (
     cmd_run_job,
     cmd_status,
     job_paths,
+    known_job_files,
+    try_load_job,
     save_job,
     start_background_process,
 )
@@ -149,6 +158,7 @@ from .tools import (
     format_cmd,
     refreshed_env,
     require_hevc_encoder,
+    require_working_hevc_encoder,
     require_tool,
     run_cmd,
     selected_hevc_encoder,
@@ -642,21 +652,63 @@ def apply_main_title_quality_override(
     clips: list[dict[str, Any]],
     quality: Any,
     bitrate_options: dict[str, Any] | None = None,
+    feature_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     spec = parse_quality_spec(quality, option="--main-title-quality")
     if spec is None:
         return None
-    candidates = reencode_quality_candidates(clips)
-    main_clip = candidates[0] if candidates else None
-    if not main_clip:
+    candidates = main_feature_quality_candidates(clips, feature_selection)
+    if not candidates:
         return None
-    report = apply_quality_spec_to_clip(
-        main_clip,
-        spec,
-        bitrate_options or {},
-        override_kind="main_title_quality",
-        override_label=f"main title quality override to {spec.get('quality')}",
-    )
+    reports = [
+        apply_quality_spec_to_clip(
+            clip,
+            spec,
+            bitrate_options or {},
+            override_kind="main_title_quality",
+            override_label=f"main feature quality override to {spec.get('quality')}",
+        )
+        for clip in candidates
+    ]
+    return main_feature_override_report(feature_selection, reports, quality=spec.get("quality"))
+
+
+def main_feature_quality_candidates(
+    clips: list[dict[str, Any]],
+    feature_selection: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    candidates = reencode_quality_candidates(clips)
+    selected_ids = set((feature_selection or {}).get("clip_ids") or [])
+    if selected_ids:
+        selected = [
+            clip for clip in candidates
+            if Path(str(clip.get("file") or "")).stem in selected_ids
+        ]
+        if selected:
+            return selected
+    return candidates[:1]
+
+
+def main_feature_override_report(
+    feature_selection: dict[str, Any] | None,
+    clips: list[dict[str, Any]],
+    **fields: Any,
+) -> dict[str, Any]:
+    selection = feature_selection or {}
+    report = {
+        **fields,
+        "selection": "playlist-feature" if selection.get("clip_ids") else "longest-physical-clip-fallback",
+        "primary_playlist": selection.get("primary_playlist"),
+        "playlists": [row.get("playlist") for row in selection.get("playlists") or []],
+        "seamless_branching": bool(selection.get("seamless_branching")),
+        "clips": clips,
+        "matched_count": len(clips),
+    }
+    # Preserve the original single-clip report surface for callers that used
+    # main-title overrides before playlist-aware feature selection existed.
+    if len(clips) == 1:
+        for key, value in clips[0].items():
+            report.setdefault(key, value)
     return report
 
 
@@ -664,41 +716,46 @@ def apply_main_title_bitrate_mode_override(
     clips: list[dict[str, Any]],
     mode: str | None,
     bitrate_options: dict[str, Any] | None = None,
+    feature_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if mode is None:
         return None
-    candidates = reencode_quality_candidates(clips)
-    main_clip = candidates[0] if candidates else None
-    if not main_clip:
+    candidates = main_feature_quality_candidates(clips, feature_selection)
+    if not candidates:
         return None
     options = override_bitrate_options(bitrate_options, mode=mode)
-    report = retarget_clip(
-        main_clip,
-        options,
-        override_kind="main_title_quality",
-        override_label=f"main title bitrate mode override to {normalize_bitrate_mode(mode)}",
-    )
-    report["mode"] = normalize_bitrate_mode(mode)
-    return report
+    reports = [
+        retarget_clip(
+            clip,
+            options,
+            override_kind="main_title_quality",
+            override_label=f"main feature bitrate mode override to {normalize_bitrate_mode(mode)}",
+        )
+        for clip in candidates
+    ]
+    return main_feature_override_report(feature_selection, reports, mode=normalize_bitrate_mode(mode))
 
 
 def apply_main_title_cq_override(
     clips: list[dict[str, Any]],
     cq_value: int | None,
     bitrate_options: dict[str, Any] | None = None,
+    feature_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if cq_value is None:
         return None
     cq_value = validate_cq_value(cq_value, option="--main-title-cq")
-    candidates = reencode_quality_candidates(clips)
-    main_clip = candidates[0] if candidates else None
-    if not main_clip:
+    candidates = main_feature_quality_candidates(clips, feature_selection)
+    if not candidates:
         return None
     options = override_bitrate_options(bitrate_options, cq_value=cq_value)
-    report = retarget_clip(main_clip, options, override_kind="main_title_cq", override_label=f"main title CQ override to {cq_value}")
-    report["cq"] = cq_value
-    report["previous_cq"] = report["previous"].get("cq")
-    return report
+    reports = []
+    for clip in candidates:
+        report = retarget_clip(clip, options, override_kind="main_title_cq", override_label=f"main feature CQ override to {cq_value}")
+        report["cq"] = cq_value
+        report["previous_cq"] = report["previous"].get("cq")
+        reports.append(report)
+    return main_feature_override_report(feature_selection, reports, cq=cq_value)
 
 
 def apply_top_n_bitrate_mode_override(
@@ -875,7 +932,7 @@ def clip_is_interlaced_by_metadata(clip: dict[str, Any]) -> bool:
 
 
 def apply_deinterlace_plan(clips: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any] | None:
-    mode = getattr(args, "deinterlace", "off")
+    mode = getattr(args, "deinterlace", DEFAULT_DEINTERLACE_MODE)
     force_names = set(normalize_clip_names(getattr(args, "deinterlace_clips", None)))
     skip_names = set(normalize_clip_names(getattr(args, "no_deinterlace_clips", None)))
     if force_names:
@@ -941,6 +998,7 @@ def apply_quality_overrides(
     clips: list[dict[str, Any]],
     bitrate_options: dict[str, Any],
     args: argparse.Namespace,
+    feature_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     general_quality_override = apply_general_quality_override(clips, getattr(args, "quality", None), bitrate_options)
     main_title_quality_override = None
@@ -950,11 +1008,11 @@ def apply_quality_overrides(
     top_n_cq_override = None
     top_n_mode_override = None
     if getattr(args, "main_title_quality", None) is not None:
-        main_title_quality_override = apply_main_title_quality_override(clips, getattr(args, "main_title_quality", None), bitrate_options)
+        main_title_quality_override = apply_main_title_quality_override(clips, getattr(args, "main_title_quality", None), bitrate_options, feature_selection)
     elif getattr(args, "main_title_cq", None) is not None:
-        main_title_cq_override = apply_main_title_cq_override(clips, getattr(args, "main_title_cq", None), bitrate_options)
+        main_title_cq_override = apply_main_title_cq_override(clips, getattr(args, "main_title_cq", None), bitrate_options, feature_selection)
     elif getattr(args, "main_title_bitrate_mode", None) is not None:
-        main_title_mode_override = apply_main_title_bitrate_mode_override(clips, getattr(args, "main_title_bitrate_mode", None), bitrate_options)
+        main_title_mode_override = apply_main_title_bitrate_mode_override(clips, getattr(args, "main_title_bitrate_mode", None), bitrate_options, feature_selection)
     if getattr(args, "top_n_quality", None):
         top_n_quality_override = apply_top_n_quality_override(clips, getattr(args, "top_n_quality", None), bitrate_options)
     elif getattr(args, "top_n_cq", None):
@@ -985,10 +1043,11 @@ def source_bitrate_files_for_effective_plan(
     clips: list[dict[str, Any]],
     bitrate_options: dict[str, Any],
     args: argparse.Namespace,
+    feature_selection: dict[str, Any] | None = None,
 ) -> set[str]:
     preview = copy.deepcopy(clips)
     remember_original_clip_actions(preview)
-    apply_quality_overrides(preview, bitrate_options, args)
+    apply_quality_overrides(preview, bitrate_options, args, feature_selection)
     apply_clip_copy_overrides(preview, getattr(args, "copy_clips", None))
     return {
         str(clip.get("file") or "")
@@ -1004,36 +1063,8 @@ def scan_clone_source_for_plan(
     args: argparse.Namespace,
     bitrate_options: dict[str, Any],
 ) -> dict[str, Any]:
-    accurate_requested = not getattr(args, "fast_bitrate", False)
-    scan = scan_disc(
-        source,
-        tools,
-        accurate_video_bitrate=False,
-        depad_video_padding=depad_video_padding_from_args(args),
-        bitrate_options=bitrate_options,
-        use_makemkv=use_makemkv_from_args(args),
-        verbose=args.verbose,
-    )
-    bitrate_files = source_bitrate_files_for_effective_plan(scan.get("clips", []), bitrate_options, args) if accurate_requested else set()
-    if bitrate_files:
-        refine_disc_video_bitrates(
-            scan,
-            tools,
-            bitrate_files,
-            depad_video_padding=depad_video_padding_from_args(args),
-            bitrate_options=bitrate_options,
-        )
-    scan["planning"] = {
-        "strategy": "metadata-then-selective-bitrate",
-        "accurate_bitrate_requested": accurate_requested,
-        "accurate_bitrate_clips": scan.get("accurate_bitrate_clips", []),
-        "accurate_bitrate_skipped_clips": sorted(
-            str(clip.get("file") or "")
-            for clip in scan.get("clips", [])
-            if clip.get("action") == "reencode" and str(clip.get("file") or "") not in bitrate_files
-        ),
-    }
-    return scan
+    from . import planning_workflow
+    return planning_workflow.scan_clone_source_for_plan(source, tools, args, bitrate_options, services=sys.modules[__name__])
 
 
 def extract_title_with_makemkv(source: Path, title_id: int, destination: Path, tools: dict[str, Any], *, dry_run: bool, verbose: bool) -> Path:
@@ -1056,6 +1087,33 @@ def extract_title_with_makemkv(source: Path, title_id: int, destination: Path, t
 
 
 def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[str, Any]:
+    if args.dry_run:
+        return _convert_movie_only_in_place(args, tools)
+    source = Path(args.source).resolve()
+    destination = Path(args.output).resolve() if args.output else default_output_for(source, "movie-only")
+    validate_output_available(destination, source, force=args.force)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    import uuid
+    staging = destination.with_name(f".{destination.name}.conversion-{uuid.uuid4().hex}")
+    staged_args = copy.copy(args)
+    staged_args.output, staged_args.force = str(staging), False
+    try:
+        result = _convert_movie_only_in_place(staged_args, tools)
+        if not conversion_succeeded(result, require_makemkv=getattr(args, "require_makemkv", False)):
+            raise ToolError("Movie-only replacement failed validation; previous output has been preserved")
+        swap_directory(staging, destination, force=args.force)
+        def relocate(value):
+            if isinstance(value, str): return value.replace(str(staging), str(destination))
+            if isinstance(value, list): return [relocate(item) for item in value]
+            if isinstance(value, dict): return {key:relocate(item) for key,item in value.items()}
+            return value
+        return relocate(result)
+    finally:
+        if staging.exists() and staging.parent == destination.parent:
+            shutil.rmtree(staging)
+
+
+def _convert_movie_only_in_place(args: argparse.Namespace, tools: dict[str, Any]) -> dict[str, Any]:
     if getattr(args, "no_makemkv", False):
         raise ToolError("movie-only mode uses MakeMKV title selection; use auto/clone-streams for MakeMKV-free conversion")
     source = Path(args.source).resolve()
@@ -1064,7 +1122,17 @@ def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[
         make_output_available(output, source, force=args.force)
     makemkv = run_makemkv_scan(source, tools, verbose=args.verbose)
     title = choose_title(makemkv, args.title)
-    staging = Path(args.staging_dir).resolve() if args.staging_dir else Path(tempfile.mkdtemp(prefix=f"{source.name}_bd2uhd_", dir=str(output.parent)))
+    if args.staging_dir:
+        staging_root = Path(args.staging_dir).resolve()
+        from .runtime_support import reject_overlap
+        try:
+            reject_overlap(staging_root, [source, output])
+        except ValueError as error:
+            raise ToolError(str(error)) from error
+        staging_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix="bd2hevc-movie-", dir=str(staging_root)))
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=f"{source.name}_bd2uhd_", dir=str(output.parent)))
     staging.mkdir(parents=True, exist_ok=True)
     if args.sample_seconds and args.sample_start:
         raise ToolError("Movie-only sample authoring uses split sources, so --sample-start must be 0 for aligned audio/subtitles.")
@@ -1141,13 +1209,18 @@ def convert_movie_only(args: argparse.Namespace, tools: dict[str, Any]) -> dict[
     )
     disc_metadata = ensure_disc_library_metadata(output)
     output_clip = output / "BDMV" / "STREAM" / "00000.m2ts"
-    validation_source = None if args.skip_audio else (transcode_input if transcode_input.exists() else None)
+    validation_source = transcode_input
     validation = validate_clip(
         validation_source,
         output_clip,
         tools,
         decode_seconds=args.decode_sample,
         require_hevc="always",
+        expected_video=mux_clip_info.get("video"),
+        preserve_subtitles=not args.skip_subtitles,
+        preserve_audio=not args.skip_audio,
+        expected_duration=args.sample_seconds,
+        preserve_stream_ids=False,
     )
     makemkv_validation = None
     if not args.sample_seconds:
@@ -1215,44 +1288,8 @@ def clone_streams_plan_payload(
     planning: dict[str, Any] | None = None,
     planning_pending: bool = False,
 ) -> dict[str, Any]:
-    return {
-        "mode": "clone-streams",
-        "warning": "full-disc mode preserves the original menu/extras structure and patches replacement-video navigation metadata",
-        "source": str(source),
-        "output": str(output),
-        "hevc_bit_depth": args.hevc_bit_depth,
-        "encoder": selected_hevc_encoder(args),
-        "bitrate": bitrate_options,
-        "main_title_cq_override": main_title_cq_override,
-        "top_n_cq_override": top_n_cq_override,
-        "quality_overrides": quality_overrides,
-        "copy_clip_overrides": copy_clip_overrides,
-        "postprocess": postprocess,
-        "audio": {
-            "mode": audio_mode_from_args(args),
-            "stereo_bitrate": stereo_audio_bitrate_from_args(args),
-            "mono_bitrate": mono_audio_bitrate_from_args(args),
-        },
-        "postprocess": postprocess,
-        "source_padding": {
-            "mode": "subtract_safe_coded_padding" if depad_video_padding_from_args(args) else "keep",
-            "note": "Library planning subtracts safe AVC/HEVC filler and VC-1 stuffing from accurate source video bitrate. --keep-source-padding and --uhd-profile disc keep the padded-source estimate.",
-        },
-        "target_disc_fit": target_disc_fit,
-        "planning": planning,
-        "uhd_profile": normalize_uhd_profile(getattr(args, "uhd_profile", "library")),
-        "uhd_structure": "always",
-        "patch_navigation": args.patch_navigation,
-        "bdj_compatibility_patches": bool(getattr(args, "bdj_compatibility_patches", False)),
-        "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
-        "vlc_fixes": compatibility_fix_names_from_args(args),
-        "custom_compatibility_patch_files": [str(path) for path in custom_compatibility_patch_files_from_args(args)],
-        "encode_ahead": encoder_is_hardware(selected_hevc_encoder(args)) and not getattr(args, "no_encode_ahead", False),
-        "encode_ahead_depth": getattr(args, "encode_ahead_depth", 3),
-        "planning_pending": planning_pending,
-        "reencode_clips": [clip_summary(c) for c in clips],
-        "compact_audio_remux_clips": [clip_summary(c) for c in (compact_audio_remux_clips or [])],
-    }
+    from . import planning_workflow
+    return planning_workflow.clone_streams_plan_payload(source, output, args, bitrate_options, main_title_cq_override, top_n_cq_override, clips, compact_audio_remux_clips=compact_audio_remux_clips, quality_overrides=quality_overrides, copy_clip_overrides=copy_clip_overrides, postprocess=postprocess, target_disc_fit=target_disc_fit, planning=planning, planning_pending=planning_pending, services=sys.modules[__name__])
 
 
 def encode_clone_clip_context(ctx: dict[str, Any], tools: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -1799,204 +1836,49 @@ def run_queued_encode_audio_mux_pipeline(
 
 
 def convert_clone_streams(args: argparse.Namespace, tools: dict[str, Any]) -> dict[str, Any]:
-    if args.uhd_scale or args.skip_audio or args.skip_subtitles:
-        raise ToolError("--uhd-scale, --skip-audio, and --skip-subtitles are only supported by movie-only mode")
-    validate_cq_override_args(args)
-    source = Path(args.source).resolve()
-    output = Path(args.output).resolve() if args.output else default_output_for(source, "clone-streams")
-    bitrate_options = bitrate_options_for_args(args)
-    if not args.dry_run:
-        make_output_available(output, source, force=args.force)
-    scan = scan_clone_source_for_plan(source, tools, args, bitrate_options)
-    remember_original_clip_actions(scan.get("clips", []))
-    quality_overrides = apply_quality_overrides(scan.get("clips", []), bitrate_options, args)
-    main_title_cq_override = (quality_overrides or {}).get("main_title_cq")
-    top_n_cq_override = (quality_overrides or {}).get("top_n_cq")
-    copy_clip_overrides = apply_clip_copy_overrides(scan.get("clips", []), getattr(args, "copy_clips", None))
-    postprocess = apply_deinterlace_plan(scan.get("clips", []), args)
-    disc_fit = fit_reencoded_clips_to_disc_size(
-        source,
-        scan.get("clips", []),
-        target_size=getattr(args, "target_disc_size", None),
-        margin=getattr(args, "target_disc_margin", 0.98),
-        audio_mode=audio_mode_from_args(args),
-    )
-    clips = [c for c in scan.get("clips", []) if c.get("action") == "reencode"]
-    compact_audio_remux_clips = (
-        [c for c in scan.get("clips", []) if clip_needs_compact_audio_remux(c)]
-        if audio_mode_from_args(args) == "compact-stereo"
-        else []
-    )
-    progress_plan_path = path_or_none(getattr(args, "progress_plan", None))
-    plan_payload = clone_streams_plan_payload(
-        source,
-        output,
-        args,
-        bitrate_options,
-        main_title_cq_override,
-        top_n_cq_override,
-        clips,
-        compact_audio_remux_clips=compact_audio_remux_clips,
-        quality_overrides=quality_overrides,
-        copy_clip_overrides=copy_clip_overrides,
-        postprocess=postprocess,
-        target_disc_fit=disc_fit,
-        planning=scan.get("planning"),
-    )
-    if progress_plan_path:
-        progress_plan_path.parent.mkdir(parents=True, exist_ok=True)
-        save_job(progress_plan_path, plan_payload)
     if args.dry_run:
-        return plan_payload
-    copy_report = copy_disc_tree_skipping_reencoded_streams(source, output, {str(clip.get("file")) for clip in clips})
-    disc_metadata = ensure_disc_library_metadata(output)
-    validations = []
-    total_seconds = sum(float(clip.get("duration") or 0) for clip in clips)
-    done_seconds = 0.0
-    progress_enabled = not getattr(args, "no_progress", False)
-    contexts = [clone_clip_context(source, output, clip) for clip in clips]
-    encoder = selected_hevc_encoder(args)
-    encode_ahead = len(contexts) > 1 and encoder_is_hardware(encoder) and not getattr(args, "no_encode_ahead", False)
-    compact_audio_pipeline = encode_ahead and audio_mode_from_args(args) == "compact-stereo"
-    if encode_ahead:
-        if compact_audio_pipeline:
-            validations, done_seconds = run_queued_encode_audio_mux_pipeline(
-                contexts,
-                tools,
-                args,
-                total_seconds=total_seconds,
-                progress_enabled=progress_enabled,
-            )
-        else:
-            validations, done_seconds = run_queued_encode_mux_pipeline(
-                contexts,
-                tools,
-                args,
-                total_seconds=total_seconds,
-                progress_enabled=progress_enabled,
-            )
-    else:
-        for index, ctx in enumerate(contexts, start=1):
-            emit_conversion_progress(
-                done_seconds,
-                total_seconds,
-                len(validations),
-                len(clips),
-                current=ctx["file"],
-                stage="encoding",
-                enabled=progress_enabled,
-            )
-            encode_clone_clip_context(ctx, tools, args)
-            validation = finalize_clone_clip_context(ctx, tools, args)
-            validations.append(validation)
-            done_seconds += float(ctx["clip"].get("duration") or 0)
-            emit_conversion_progress(
-                done_seconds,
-                total_seconds,
-                index,
-                len(clips),
-                current=ctx["file"],
-                stage="validated",
-                enabled=progress_enabled,
-            )
-    compact_audio_remux_validations: list[dict[str, Any]] = []
-    for clip in compact_audio_remux_clips:
-        ctx = clone_clip_context(source, output, clip)
-        progress_event("audio-remux-start", ctx["file"])
-        compact_audio_remux_validations.append(remux_compact_audio_copy_context(ctx, tools, args))
-        progress_event("audio-remux-done", ctx["file"])
-    validations.extend(compact_audio_remux_validations)
-    navigation_patch = None
-    emit_conversion_progress(
-        done_seconds,
-        total_seconds,
-        len(clips),
-        len(clips),
-        current=None,
-        stage="post-processing",
-        enabled=progress_enabled,
-    )
-    if args.patch_navigation:
-        compact_audio_clip_files = (
-            [clip["file"] for clip in clips if compact_audio_source_streams(clip)]
-            + [clip["file"] for clip in compact_audio_remux_clips]
-            if audio_mode_from_args(args) == "compact-stereo"
-            else []
-        )
-        navigation_patch = patch_navigation_for_hevc(
-            output,
-            [clip["file"] for clip in clips],
-            tools=tools,
-            source_root=source,
-            compact_audio_clip_files=compact_audio_clip_files,
-            patch_version_headers=patch_version_headers_from_args(args),
-        )
-    uhd_structure = ensure_uhd_backup_structure(output, patch_version_headers=patch_version_headers_from_args(args))
-    bdj_compatibility_patch = None
-    selected_vlc_fixes = compatibility_fix_names_from_args(args)
-    custom_patch_files = custom_compatibility_patch_files_from_args(args)
-    if selected_vlc_fixes or custom_patch_files:
-        bdj_compatibility_patch = patch_known_bdj_compatibility(
-            output,
-            fixes=selected_vlc_fixes,
-            custom_patch_files=custom_patch_files,
-        )
-    makemkv_validation = validate_disc_titles(
-        output,
-        tools,
-        use_makemkv=use_makemkv_from_args(args),
-        require_makemkv=getattr(args, "require_makemkv", False),
-        verbose=args.verbose,
-    )
-    result = {
-        "mode": "clone-streams",
-        "warning": "full-disc mode preserves BD-J/menu structure; patched navigation metadata still needs player testing",
-        "source": str(source),
-        "output": str(output),
-        "hevc_bit_depth": args.hevc_bit_depth,
-        "encoder": encoder,
-        "bitrate": bitrate_options,
-        "main_title_cq_override": main_title_cq_override,
-        "top_n_cq_override": top_n_cq_override,
-        "quality_overrides": quality_overrides,
-        "copy_clip_overrides": copy_clip_overrides,
-        "audio": {
-            "mode": audio_mode_from_args(args),
-            "stereo_bitrate": stereo_audio_bitrate_from_args(args),
-            "mono_bitrate": mono_audio_bitrate_from_args(args),
-        },
-        "vlc_compatibility": getattr(args, "vlc_compat", DEFAULT_VLC_COMPATIBILITY_MODE),
-        "target_disc_fit": disc_fit,
-        "planning": scan.get("planning"),
-        "uhd_profile": normalize_uhd_profile(getattr(args, "uhd_profile", "library")),
-        "uhd_structure": uhd_structure,
-        "vlc_fixes": selected_vlc_fixes,
-        "custom_compatibility_patch_files": [str(path) for path in custom_patch_files],
-        "encode_ahead": encode_ahead,
-        "encode_ahead_depth": getattr(args, "encode_ahead_depth", 3) if encode_ahead else 0,
-        "preservation_copy": copy_report,
-        "disc_metadata": disc_metadata,
-        "reencoded": [c["file"] for c in clips],
-        "compact_audio_remuxed": [c["file"] for c in compact_audio_remux_clips],
-        "validation": validations,
-        "makemkv_validation": makemkv_validation,
-    }
-    if encode_ahead:
-        result["pipeline"] = "video-audio-mux-queue" if compact_audio_pipeline else "encode-mux-queue"
-    if navigation_patch is not None:
-        result["navigation_patch"] = navigation_patch
-    if bdj_compatibility_patch is not None:
-        result["bdj_compatibility_patch"] = bdj_compatibility_patch
-    emit_conversion_progress(
-        done_seconds,
-        total_seconds,
-        len(clips),
-        len(clips),
-        current=None,
-        stage="completed",
-        enabled=progress_enabled,
-    )
-    return result
+        return _convert_clone_streams_in_place(args, tools)
+    source = Path(args.source).resolve()
+    destination = Path(args.output).resolve() if args.output else default_output_for(source, "clone-streams")
+    validate_output_available(destination, source, force=args.force)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    import uuid
+    staging = destination.with_name(f".{destination.name}.conversion-{uuid.uuid4().hex}")
+    staged_args = copy.copy(args)
+    staged_args.output = str(staging)
+    staged_args.force = False
+    try:
+        result = _convert_clone_streams_in_place(staged_args, tools)
+        if not conversion_succeeded(result, require_makemkv=getattr(args, "require_makemkv", False)):
+            # Keep the complete failed result outside staging before cleanup.
+            # Each attempt gets a new file, preserving earlier diagnostic reports.
+            report = DEFAULT_REPORT_DIR / "validation-failures" / f"{safe_name(destination.name)}-{uuid.uuid4().hex}.json"
+            validate_output_available(report, source, force=False)
+            report.parent.mkdir(parents=True, exist_ok=True)
+            with report.open("x", encoding="utf-8") as stream:
+                json.dump(result, stream, indent=2)
+            raise ToolError(f"Replacement failed validation; previous output has been preserved. Full validation report: {report}")
+        swap_directory(staging, destination, force=args.force)
+        def relocate(value):
+            if isinstance(value, str): return value.replace(str(staging), str(destination))
+            if isinstance(value, list): return [relocate(item) for item in value]
+            if isinstance(value, dict): return {key: relocate(item) for key,item in value.items()}
+            return value
+        result = relocate(result)
+        plan = path_or_none(getattr(args, "progress_plan", None))
+        if plan and plan.is_file():
+            save_job(plan, relocate(json.loads(plan.read_text(encoding="utf-8"))))
+        return result
+    finally:
+        if staging.exists():
+            if staging.parent != destination.parent or not staging.name.startswith("." + destination.name + ".conversion-"):
+                raise ToolError("Unsafe staging cleanup")
+            shutil.rmtree(staging)
+
+
+def _convert_clone_streams_in_place(args: argparse.Namespace, tools: dict[str, Any]) -> dict[str, Any]:
+    from . import conversion_workflow
+    return conversion_workflow._convert_clone_streams_in_place(args, tools, services=sys.modules[__name__])
 
 
 def cmd_tools(args: argparse.Namespace) -> int:
@@ -2012,6 +1894,10 @@ def cmd_tools(args: argparse.Namespace) -> int:
         available_hevc = tools.get("hevc_encoders") or []
         print(f"HEVC encoders: {', '.join(available_hevc) if available_hevc else 'none found'}")
         print(f"hardware encode-ahead: {'available' if any(encoder_is_hardware(e) for e in available_hevc) else 'not available'}")
+        try:
+            print(f"UDF 2.50 ISO author: {find_udf_tool()}")
+        except ToolError:
+            print("UDF 2.50 ISO author: not found (required only for ISO output)")
     missing = [k for k in ("ffmpeg", "ffprobe", "tsmuxer") if not tools.get(k)]
     if missing:
         print(f"Missing tools: {', '.join(missing)}", file=sys.stderr)
@@ -2024,6 +1910,12 @@ def cmd_tools(args: argparse.Namespace) -> int:
     if not (tools.get("makemkvcon64") or tools.get("makemkvcon")):
         print("MakeMKV CLI was not found; MakeMKV title validation will be skipped unless explicitly required.", file=sys.stderr)
     return 0
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    from .gui import launch_gui
+
+    return launch_gui()
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
@@ -2047,7 +1939,13 @@ def cmd_scan(args: argparse.Namespace) -> int:
             verbose=args.verbose,
         )
         remember_original_clip_actions(report.get("clips", []))
-        report["quality_overrides"] = apply_quality_overrides(report.get("clips", []), bitrate_options, args)
+        report["main_feature"] = main_feature_selection(
+            root,
+            known_clip_ids={Path(str(clip.get("file") or "")).stem for clip in report.get("clips", [])},
+        )
+        report["quality_overrides"] = apply_quality_overrides(
+            report.get("clips", []), bitrate_options, args, report.get("main_feature")
+        )
         report["copy_clip_overrides"] = apply_clip_copy_overrides(report.get("clips", []), getattr(args, "copy_clips", None))
         report["postprocess"] = apply_deinterlace_plan(report.get("clips", []), args)
         report["summary"] = summarize_disc(report)
@@ -2066,97 +1964,28 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def planned_clip_quality_text(clip: dict[str, Any]) -> str:
-    action = clip.get("action")
-    original_action = original_clip_action(clip)
-    video = clip.get("video") or {}
-    target = video.get("target_hevc") or {}
-    if action == "copy":
-        return "copy" if original_action == "reencode" else str(original_action or "copy")
-    if action == "already_hevc":
-        return "already HEVC"
-    if action != "reencode":
-        return str(action or "")
-    mode = target.get("mode") or "balanced"
-    if target.get("rate_control") == "cq":
-        return f"cq:{target.get('cq')} ({mode})"
-    if target.get("target_mbps") is not None:
-        return f"{target.get('target_mbps')} Mbps ({mode})"
-    return str(mode)
+    from . import clip_listing
+    return clip_listing.planned_clip_quality_text(clip, services=sys.modules[__name__])
 
 
 def planned_clip_output_codec(clip: dict[str, Any]) -> str | None:
-    video = clip.get("video") or {}
-    source_codec = video.get("codec_name")
-    action = clip.get("action")
-    if action == "reencode":
-        return "hevc"
-    if action in {"copy", "already_hevc"}:
-        return source_codec
-    return None
+    from . import clip_listing
+    return clip_listing.planned_clip_output_codec(clip, services=sys.modules[__name__])
 
 
 def field_order_label(field_order: Any) -> str:
-    text = str(field_order or "").strip().lower()
-    if not text or text == "unknown":
-        return "-"
-    if text == "progressive":
-        return "prog"
-    if text in {"tt", "bb", "tb", "bt"}:
-        return text
-    if "top" in text:
-        return "top"
-    if "bottom" in text:
-        return "bottom"
-    return text[:7]
+    from . import clip_listing
+    return clip_listing.field_order_label(field_order, services=sys.modules[__name__])
 
 
 def clip_list_rows(clips: list[dict[str, Any]], *, sort: str = "duration") -> list[dict[str, Any]]:
-    if sort == "file":
-        sorted_clips = sorted(clips, key=lambda item: str(item.get("file") or ""))
-    else:
-        sorted_clips = sorted(clips, key=lambda item: float(item.get("duration") or 0), reverse=True)
-    rows: list[dict[str, Any]] = []
-    for clip in sorted_clips:
-        video = clip.get("video") or {}
-        rows.append(
-            {
-                "clip": clip.get("file"),
-                "duration": clip.get("duration"),
-                "duration_text": format_duration(clip.get("duration")),
-                "planned_action": clip.get("action"),
-                "original_action": original_clip_action(clip),
-                "codec": video.get("codec_name"),
-                "source_codec": video.get("codec_name"),
-                "planned_codec": planned_clip_output_codec(clip),
-                "source_video_mbps": video.get("source_video_bitrate_mbps"),
-                "planned_quality": planned_clip_quality_text(clip),
-                "field_order": video.get("field_order"),
-                "postprocess": video.get("postprocess"),
-            }
-        )
-    return rows
+    from . import clip_listing
+    return clip_listing.clip_list_rows(clips, sort=sort, services=sys.modules[__name__])
 
 
 def print_clip_list(rows: list[dict[str, Any]]) -> None:
-    print(f"{'clip':<12} {'duration':>8} {'action':<12} {'source':<10} {'field':<7} {'output':<8} {'src Mbps':>8}  quality")
-    print(f"{'-' * 12} {'-' * 8} {'-' * 12} {'-' * 10} {'-' * 7} {'-' * 8} {'-' * 8}  {'-' * 24}")
-    for row in rows:
-        mbps_text = "" if row.get("source_video_mbps") is None else str(row.get("source_video_mbps"))
-        postprocess = row.get("postprocess") or {}
-        quality = row.get("planned_quality") or ""
-        if (postprocess.get("deinterlace") or {}).get("enabled"):
-            quality = f"{quality}; deinterlace".strip("; ")
-        field = field_order_label(row.get("field_order"))
-        print(
-            f"{str(row.get('clip') or ''):<12} "
-            f"{str(row.get('duration_text') or ''):>8} "
-            f"{str(row.get('planned_action') or ''):<12} "
-            f"{str(row.get('source_codec') or row.get('codec') or ''):<10} "
-            f"{field:<7} "
-            f"{str(row.get('planned_codec') or ''):<8} "
-            f"{mbps_text:>8}  "
-            f"{quality}"
-        )
+    from . import clip_listing
+    return clip_listing.print_clip_list(rows, services=sys.modules[__name__])
 
 
 def cmd_clips(args: argparse.Namespace) -> int:
@@ -2177,7 +2006,13 @@ def cmd_clips(args: argparse.Namespace) -> int:
         verbose=args.verbose,
     )
     remember_original_clip_actions(report.get("clips", []))
-    quality_overrides = apply_quality_overrides(report.get("clips", []), bitrate_options, args)
+    feature_selection = main_feature_selection(
+        source,
+        known_clip_ids={Path(str(clip.get("file") or "")).stem for clip in report.get("clips", [])},
+    )
+    quality_overrides = apply_quality_overrides(
+        report.get("clips", []), bitrate_options, args, feature_selection
+    )
     copy_clip_overrides = apply_clip_copy_overrides(report.get("clips", []), getattr(args, "copy_clips", None))
     postprocess = apply_deinterlace_plan(report.get("clips", []), args)
     rows = clip_list_rows(report.get("clips", []), sort=args.sort)
@@ -2185,6 +2020,7 @@ def cmd_clips(args: argparse.Namespace) -> int:
         "source": str(source),
         "sort": args.sort,
         "bitrate": bitrate_options,
+        "main_feature": feature_selection,
         "quality_overrides": quality_overrides,
         "copy_clip_overrides": copy_clip_overrides,
         "postprocess": postprocess,
@@ -2199,15 +2035,30 @@ def cmd_clips(args: argparse.Namespace) -> int:
 
 
 def cmd_convert(args: argparse.Namespace) -> int:
+    slot_path = DEFAULT_JOB_DIR / "active-work.lock"
+    if args.dry_run or inherited_work_slot(slot_path):
+        return _cmd_convert(args)
+    slot = FileLock(slot_path, timeout=0)
+    if not slot.acquire():
+        raise ToolError("Another disc is already converting. Queue this disc or wait for it to finish.")
+    try:
+        return _cmd_convert(args)
+    finally:
+        slot.release()
+
+
+def _cmd_convert(args: argparse.Namespace) -> int:
     tools = discover_tools()
     for key in ("ffmpeg", "ffprobe", "tsmuxer"):
         require_tool(tools, key)
     require_hevc_encoder(tools, selected_hevc_encoder(args))
     validate_encoder_bitrate_compatibility(args)
     if args.mode == "movie-only":
+        if getattr(args, "output_format", "folder") == "iso":
+            raise ToolError("ISO output is available for full-disc clone-streams mode, not movie-only mode")
         result = convert_movie_only(args, tools)
     else:
-        result = convert_clone_streams(args, tools)
+        result = convert_clone_streams_with_output_format(args, tools)
     report_path = path_or_none(getattr(args, "report", None))
     if report_path:
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2217,6 +2068,75 @@ def cmd_convert(args: argparse.Namespace) -> int:
     else:
         print_conversion_summary(result, report_path=report_path, dry_run=args.dry_run)
     return 0 if conversion_succeeded(result, require_makemkv=getattr(args, "require_makemkv", False), dry_run=args.dry_run) else 4
+
+
+def convert_clone_streams_with_output_format(args: argparse.Namespace, tools: dict[str, Any]) -> dict[str, Any]:
+    if getattr(args, "output_format", "folder") != "iso":
+        return convert_clone_streams(args, tools)
+    source = Path(args.source).resolve()
+    requested = Path(args.output).resolve() if args.output else default_output_for(source, "clone-streams")
+    final_iso = iso_output_path(requested)
+    staging = iso_staging_path(final_iso)
+    if not args.dry_run:
+        validate_output_available(final_iso, source, force=args.force)
+        if final_iso.is_dir():
+            raise ToolError(f"Output ISO path is a directory: {final_iso}")
+    folder_args = copy.copy(args)
+    folder_args.output_format = "folder"
+    folder_args.output = str(staging)
+    result = convert_clone_streams(folder_args, tools)
+    result["output_format"] = "iso"
+    result["folder_staging"] = str(staging)
+    result["output"] = str(final_iso)
+    if args.dry_run:
+        return result
+    if not conversion_succeeded(result, require_makemkv=getattr(args, "require_makemkv", False)):
+        return result
+    progress_event("iso-author-start", final_iso.name)
+    result["iso_authoring"] = author_bluray_iso(
+        staging,
+        final_iso,
+        tool=getattr(args, "iso_author_tool", None),
+        label=source.name,
+        force=args.force,
+        verbose=args.verbose,
+    )
+    progress_event("iso-author-done", final_iso.name)
+    if not getattr(args, "keep_iso_staging", False):
+        shutil.rmtree(staging)
+        result["folder_staging_removed"] = True
+    return result
+
+
+def cmd_author_iso(args: argparse.Namespace) -> int:
+    report = author_bluray_iso(
+        args.source,
+        args.output,
+        tool=args.iso_author_tool,
+        label=args.label,
+        force=args.force,
+        verbose=args.verbose,
+    )
+    report_path = path_or_none(args.report)
+    if report_path:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"Blu-ray ISO created: {report['image']}")
+        print(f"UDF revision: {report['udf_revision']}  files verified: {report['files']}")
+    return 0
+
+
+def cmd_verify_iso(args: argparse.Namespace) -> int:
+    report = verify_bluray_iso(args.image, tool=args.iso_author_tool, verbose=args.verbose, reference=getattr(args, "reference", None), manifest=getattr(args, "manifest", None))
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"Blu-ray ISO verification passed: {report['image']}")
+        print(f"UDF revision: {report['udf_revision']}  files: {report['files']}")
+    return 0
 
 
 def cmd_auto(args: argparse.Namespace) -> int:
@@ -2233,6 +2153,8 @@ def cmd_auto(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     tools = discover_tools()
     target = Path(args.target).resolve()
+    if not target.exists():
+        raise ToolError(f"Validation target does not exist: {target}")
     reference_stream_dir: Path | None = None
     if args.reference:
         reference_root = Path(args.reference).resolve()
@@ -2255,10 +2177,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
     else:
         clips = [target]
         makemkv_validation = None
+    if not clips or any(not clip.is_file() for clip in clips):
+        raise ToolError(f"Validation requires at least one existing media clip: {target}")
     results = []
     for clip in clips:
-        if not clip.exists():
-            continue
         reference_clip = reference_stream_dir / clip.name if reference_stream_dir else None
         results.append(
             validate_clip(
@@ -2273,7 +2195,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {"source_backup": args.source_backup, "reference": args.reference, "clips": results}
     if makemkv_validation is not None:
         payload["makemkv_validation"] = makemkv_validation
-    ok = all(r.get("ok") for r in results) and (makemkv_validation is None or makemkv_validation.get("ok") or not args.require_makemkv)
+    ok = bool(results) and all(r.get("ok") for r in results) and (makemkv_validation is None or makemkv_validation.get("ok") or not args.require_makemkv)
     report_path = path_or_none(getattr(args, "report", None))
     if report_path:
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2829,7 +2751,7 @@ def cmd_play(args: argparse.Namespace) -> int:
     tools = discover_tools()
     vlc = require_tool(tools, "vlc")
     target = Path(args.target).resolve()
-    roots = find_disc_roots([target])
+    roots = [target] if target.is_file() and target.suffix.lower() == ".iso" else find_disc_roots([target])
     if not roots:
         raise ToolError(f"No BDMV folder found at {target}")
     root = roots[0]
@@ -3050,11 +2972,17 @@ def cmd_record_libbluray(args: argparse.Namespace) -> int:
 
 
 def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -> dict[str, Any]:
+    with FileLock(DEFAULT_JOB_DIR / "queue-admission.lock"):
+        return _enqueue_conversion_job(args, announce=announce)
+
+
+def _enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -> dict[str, Any]:
+    from .queueing import job_reserves_output
     validate_cq_override_args(args)
     tools = discover_tools()
     for key in ("ffmpeg", "ffprobe", "tsmuxer"):
         require_tool(tools, key)
-    require_hevc_encoder(tools, selected_hevc_encoder(args))
+    require_working_hevc_encoder(tools, selected_hevc_encoder(args))
     validate_encoder_bitrate_compatibility(args)
     source = Path(args.source).resolve()
     roots = find_disc_roots([source])
@@ -3062,10 +2990,22 @@ def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -
         raise ToolError(f"No BDMV folder found at {source}")
     source = roots[0]
     output = Path(args.output).resolve() if args.output else default_output_for(source, "clone-streams")
-    make_output_available(output, source, force=args.force)
+    if getattr(args, "output_format", "folder") == "iso":
+        output = iso_output_path(output)
+    for existing_path in known_job_files():
+        existing = try_load_job(existing_path)
+        if existing and job_reserves_output(existing) and Path(str(existing.get("output") or "")).resolve() == output:
+            raise ToolError(f"Output is already reserved by job {existing.get('id')}: {output}")
+    output_existed_at_queue = output.exists()
+    validate_output_available(output, source, force=args.force)
+    if getattr(args, "output_format", "folder") == "iso" and output.is_dir():
+        raise ToolError(f"Output ISO path is a directory: {output}")
+    output_created_by_job = not output_existed_at_queue
 
     job_id = safe_name(args.name or f"{time.strftime('%Y%m%d-%H%M%S')}-{source.name}")
     paths = job_paths(job_id)
+    if paths["job"].exists() and job_reserves_output(try_load_job(paths["job"]) or {}):
+        raise ToolError(f"An active job already owns this identifier: {job_id}")
     if paths["job"].exists() and not getattr(args, "force_job", False):
         raise ToolError(f"Job already exists: {job_id}. Use a different --name.")
     command = auto_command_for_job(args, output, paths["report"], paths["plan"])
@@ -3077,6 +3017,10 @@ def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -
         "queue_order": queue_order,
         "source": str(source),
         "output": str(output),
+        "output_existed_at_queue": output_existed_at_queue,
+        "output_created_by_job": output_created_by_job,
+        "output_format": getattr(args, "output_format", "folder"),
+        "staging_output": str(iso_staging_path(output)) if getattr(args, "output_format", "folder") == "iso" else None,
         "plan": str(paths["plan"]),
         "log": str(paths["log"]),
         "report": str(paths["report"]),
@@ -3085,12 +3029,18 @@ def enqueue_conversion_job(args: argparse.Namespace, *, announce: bool = True) -
         "command": command,
         "reencode_clip_count": None,
     }
-    save_job(paths["job"], job)
-    pid = start_background_process(paths["job"])
-    job["status"] = "queued"
-    job["pid"] = pid
     job["queued_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    save_job(paths["job"], job)
+    save_job(paths["job"], job, allow_cancel_reset=bool(getattr(args, "force_job", False)))
+    try:
+        pid = start_background_process(paths["job"])
+    except BaseException:
+        job["status"] = "failed"
+        job["error"] = "Worker could not be started"
+        save_job(paths["job"], job)
+        raise
+    # The worker owns its PID/state. Never rewrite the pre-spawn snapshot.
+    job = try_load_job(paths["job"]) or job
+    job.setdefault("pid", pid)
     if announce:
         print("BD2HEVC background conversion queued")
         print(f"Job: {job_id}")
@@ -3109,9 +3059,14 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def queue_output_for(source: Path, args: argparse.Namespace) -> Path:
     if getattr(args, "output_dir", None):
-        name = f"{disc_title_from_folder_name(source.name)} (BD) (UHD converted)"
-        return Path(args.output_dir).resolve() / name
-    return default_output_for(source, "clone-streams")
+        output = generated_output_for(
+            source,
+            Path(args.output_dir),
+            add_tags=bool(getattr(args, "add_output_tags", True)),
+        )
+    else:
+        output = default_output_for(source, "clone-streams")
+    return iso_output_path(output) if getattr(args, "output_format", "folder") == "iso" else output
 
 
 def cmd_queue(args: argparse.Namespace) -> int:
@@ -3158,9 +3113,9 @@ def add_bitrate_args(parser: argparse.ArgumentParser, *, include_named_preset: b
     parser.add_argument("--keep-source-padding", action="store_true", help="Keep coded filler/stuffing bytes in source bitrate planning. By default, accurate planning subtracts safe AVC/HEVC/VC-1 padding for library outputs.")
     parser.add_argument("--compact-cq-value", "--anime-cq-value", dest="compact_cq_value", type=int, default=ANIME_CQ_VALUE, help="CQ value for reencoded clips when --bitrate-mode compact-cq is used. Lower is larger/higher quality; default 18.")
     parser.add_argument("--compact-cq-min-duration", "--episode-compact-min-duration", "--anime-cq-min-duration", dest="anime_cq_min_duration", type=parse_duration_arg, default=DEFAULT_ANIME_CQ_MIN_DURATION, help="Minimum clip duration for --bitrate-mode compact-cq to use CQ. Defaults to the 10-second reencode threshold. Raise it if only episode/movie-length clips should use CQ. Accepts values like 15m or 00:15:00. Shorter reencoded clips use smaller. --episode-compact-min-duration and --anime-cq-min-duration are accepted as legacy aliases.")
-    parser.add_argument("--main-title-quality", metavar="QUALITY", default=None, help="Quality for the longest reencode-eligible clip. Accepts a bitrate preset, cq:N, source-ratio:N, legacy presets, or copy/no-reencode. Mutually exclusive with top-N overrides.")
+    parser.add_argument("--main-title-quality", metavar="QUALITY", default=None, help="Quality for every physical clip used by the detected main feature playlist and closely related seamless-branched cuts. Falls back to the longest reencode-eligible clip when playlist topology is unavailable. Accepts a bitrate preset, cq:N, source-ratio:N, legacy presets, or copy/no-reencode. Mutually exclusive with top-N overrides.")
     parser.add_argument("--main-title-bitrate-mode", metavar="MODE", default=None, help="Legacy spelling for --main-title-quality MODE.")
-    parser.add_argument("--main-title-cq", type=int, default=None, help="Use compact-cq at this CQ value for the longest reencoded clip. Lower is larger/higher quality; useful for CQ20 extras with a CQ18 main movie.")
+    parser.add_argument("--main-title-cq", type=int, default=None, help="Use compact-cq at this CQ value for all detected main-feature clips, including alternate seamless-branched cuts. Lower is larger/higher quality; useful for CQ20 extras with a CQ18 movie.")
     parser.add_argument("--top-n-quality", nargs=2, metavar=("COUNT", "QUALITY"), default=None, help="Quality for the COUNT longest reencode-eligible clips. QUALITY accepts a bitrate preset, cq:N, source-ratio:N, legacy presets, or copy/no-reencode.")
     parser.add_argument("--top-n-bitrate-mode", nargs=2, metavar=("COUNT", "MODE"), default=None, help="Legacy spelling for --top-n-quality COUNT MODE.")
     parser.add_argument("--top-n-cq", nargs=2, type=int, metavar=("COUNT", "CQ"), default=None, help="Use compact-cq at this CQ value for the COUNT longest reencoded clips. Mutually exclusive with main-title overrides; useful for episode discs, e.g. --top-n-cq 3 18.")
@@ -3177,8 +3132,14 @@ def add_encoder_args(parser: argparse.ArgumentParser, *, include_encode_ahead: b
         parser.add_argument("--encode-ahead-depth", type=int, default=3, help="Maximum completed video/audio outputs per lane allowed to wait for muxing. Hardware encoders only; default 3.")
 
 
+class DeinterlaceModeAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.deinterlace_explicit = True
+
+
 def add_postprocess_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--deinterlace", choices=DEINTERLACE_MODES, default="off", help="Optional video post-processing for reencoded clips. off preserves the source; auto deinterlaces clips flagged interlaced by source metadata; force deinterlaces every reencoded clip.")
+    parser.add_argument("--deinterlace", choices=DEINTERLACE_MODES, default=DEFAULT_DEINTERLACE_MODE, action=DeinterlaceModeAction, help="Video post-processing for reencoded clips. Default auto deinterlaces clips flagged interlaced by source metadata; off disables deinterlacing; force deinterlaces every reencoded clip.")
     parser.add_argument("--deinterlace-filter", choices=DEINTERLACE_FILTERS, default="bwdif", help="FFmpeg deinterlace filter to use when deinterlacing. bwdif is higher quality; yadif is the compatibility fallback.")
     parser.add_argument("--deinterlace-clips", nargs="+", action="append", default=None, metavar="CLIP", help="Force deinterlacing for named M2TS clips, even when --deinterlace is off or metadata says progressive. Accepts 00043 or 00043.m2ts. Can be repeated.")
     parser.add_argument("--no-deinterlace-clips", nargs="+", action="append", default=None, metavar="CLIP", help="Do not deinterlace named M2TS clips, even when --deinterlace auto/force would select them. Can be repeated.")
@@ -3195,6 +3156,12 @@ def add_uhd_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="Output profile. library is the normal digital-library mode: UHD-like folders with BD-style navigation headers for VLC compatibility. disc adds physical-disc guardrails, patches navigation headers toward UHD, and requires --target-disc-size with VBR quality. auto/off are legacy aliases for library.")
     parser.add_argument("--target-disc-size", default=None, metavar="SIZE", help=f"Scale VBR video targets to fit a physical-disc budget. Accepts {sizes}, or a size such as 23.5GB. Requires VBR targets, not CQ.")
     parser.add_argument("--target-disc-margin", type=float, default=0.98, help="Safety margin for --target-disc-size. Default 0.98 leaves room for filesystem/authoring overhead.")
+
+
+def add_iso_output_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--output-format", choices=["folder", "iso"], default="folder", help="Write the converted full-disc backup as a normal folder (default) or a verified UDF 2.50 Blu-ray ISO.")
+    parser.add_argument("--iso-author-tool", default=None, help="Optional path to a compatible Hadris UDF author. The bundled tool is used by default.")
+    parser.add_argument("--keep-iso-staging", action="store_true", help="Keep the converted folder after successfully authoring an ISO. By default it is removed after verification.")
 
 
 def add_makemkv_args(parser: argparse.ArgumentParser) -> None:
@@ -3220,455 +3187,8 @@ def command_parser(sub: argparse._SubParsersAction, name: str, *, help: str, des
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="BD2HEVC: convert local Blu-ray backups to HEVC while preserving menus, extras, audio, and subtitles.",
-        epilog=(
-            "Common commands:\n"
-            "  py bd2hevc.py queue \"BD backups\" --output-dir \"Converted UHD-BD\"\n"
-            "  py bd2hevc.py status --watch\n"
-            "  py bd2hevc.py clips \"BD backups\\Movie Disc\"\n"
-            "  py bd2hevc.py preset list\n"
-            "  py bd2hevc.py jobs\n"
-            "  py bd2hevc.py diagnose \"Converted UHD-BD\\Movie (BD) (UHD converted)\"\n"
-            "  py bd2hevc.py record-libbluray \"Converted UHD-BD\\Movie (BD) (UHD converted)\"\n"
-            "\n"
-            "Command help:\n"
-            "  py bd2hevc.py <command> --help\n"
-            "  py bd2hevc.py queue --help"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument("--version", action="version", version=f"BD2HEVC {VERSION}")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    p_tools = command_parser(sub, "tools", help="Show discovered external tools and HEVC encoder support.", description="Show the external programs BD2HEVC found and whether hardware HEVC encoding is available.", examples="""
-  py bd2hevc.py tools
-  py bd2hevc.py tools --json
-""")
-    p_tools.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_tools.set_defaults(func=cmd_tools)
-
-    p_preset = command_parser(sub, "preset", help="Save, list, show, and remove named presets.", description="Manage named conversion presets stored in the user config folder.", examples="""
-  py bd2hevc.py preset save sarah --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
-  py bd2hevc.py preset save source-mix --quality source-ratio:0.60 --codec-source-ratio h264=0.55 --codec-source-ratio mpeg2video=0.30
-  py bd2hevc.py preset list
-  py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --preset sarah
-""")
-    preset_sub = p_preset.add_subparsers(dest="preset_command", required=True)
-    p_preset_list = preset_sub.add_parser("list", help="List saved and bundled presets.")
-    p_preset_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_preset_list.set_defaults(func=cmd_preset_list)
-
-    p_preset_show = preset_sub.add_parser("show", help="Show one preset.")
-    p_preset_show.add_argument("name", help="Preset name.")
-    p_preset_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_preset_show.set_defaults(func=cmd_preset_show)
-
-    p_preset_save = preset_sub.add_parser("save", help="Save a named preset from command-line options.")
-    p_preset_save.add_argument("name", help="Preset name. Use letters, numbers, dots, underscores, and hyphens.")
-    p_preset_save.add_argument("--description", default=None, help="Optional short note shown by 'preset list'.")
-    p_preset_save.add_argument("--force", action="store_true", help="Replace an existing preset.")
-    p_preset_save.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_preset_save.add_argument("--encoder", choices=HEVC_ENCODERS, default="hevc_nvenc", help="Save a preferred HEVC encoder in the preset.")
-    p_preset_save.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="Save a preferred HEVC output bit depth.")
-    add_bitrate_args(p_preset_save, include_named_preset=False, include_file_preset=False)
-    add_postprocess_args(p_preset_save)
-    add_audio_args(p_preset_save)
-    p_preset_save.set_defaults(func=cmd_preset_save_validated)
-
-    p_preset_remove = preset_sub.add_parser("remove", aliases=["rm", "delete"], help="Remove a user preset.")
-    p_preset_remove.add_argument("name", help="Preset name.")
-    p_preset_remove.set_defaults(func=cmd_preset_remove)
-
-    p_scan = command_parser(sub, "scan", help="Scan one or more BDMV backups with MakeMKV and FFprobe.", description="Inspect Blu-ray backup folders before conversion and write scan reports.", examples="""
-  py bd2hevc.py scan "BD backups\\Movie Disc"
-  py bd2hevc.py scan "BD backups" --no-makemkv
-  py bd2hevc.py scan "BD backups\\Movie Disc" --accurate-video-bitrate
-""")
-    p_scan.add_argument("paths", nargs="+", help="Disc folders or a parent folder containing disc folders.")
-    p_scan.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR))
-    p_scan.add_argument("--accurate-video-bitrate", action="store_true", help="Sum video packet sizes for bitrate. Slower, but best for encode planning.")
-    add_bitrate_args(p_scan)
-    add_postprocess_args(p_scan)
-    add_makemkv_args(p_scan)
-    p_scan.add_argument("--verbose", action="store_true")
-    p_scan.set_defaults(func=cmd_scan)
-
-    p_clips = command_parser(sub, "clips", help="List M2TS clip names, durations, and planned quality.", description="List the source clips in a Blu-ray backup so quality overrides can be chosen without reading raw JSON.", examples="""
-  py bd2hevc.py clips "BD backups\\Movie Disc"
-  py bd2hevc.py clips "BD backups\\Episode Disc" --quality cq:20 --top-n-quality 3 cq:18
-  py bd2hevc.py clips "BD backups\\Menu-heavy Disc" --sort file --clip-quality 00012 copy
-""")
-    p_clips.add_argument("source", help="Source BD backup folder.")
-    p_clips.add_argument("--sort", choices=["duration", "file"], default="duration", help="Sort by duration descending or by clip filename.")
-    p_clips.add_argument("--accurate-video-bitrate", action="store_true", help="Sum video packet sizes for bitrate. Slower, but best for exact source Mbps.")
-    add_bitrate_args(p_clips)
-    add_postprocess_args(p_clips)
-    add_makemkv_args(p_clips)
-    p_clips.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_clips.add_argument("--verbose", action="store_true")
-    p_clips.set_defaults(func=cmd_clips)
-
-    p_convert = command_parser(sub, "convert", help="Convert a BD backup.", description="Legacy conversion command. For normal full-disc menu-preserving use, prefer 'auto', 'start', or 'queue'.", examples="""
-  py bd2hevc.py convert "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc"
-  py bd2hevc.py convert "BD backups\\Movie Disc" --mode clone-streams
-  py bd2hevc.py convert "BD backups\\Movie Disc" --mode movie-only --title 0
-""")
-    add_convert_args(p_convert)
-    p_convert.set_defaults(func=cmd_convert)
-
-    p_auto = command_parser(sub, "auto", help="Faithful full-disc conversion. Only the source backup path is required.", description="Run a foreground full-disc conversion that preserves menus, extras, subtitles, and audio by default.", examples="""
-  py bd2hevc.py auto "BD backups\\Movie Disc"
-  py bd2hevc.py auto "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py auto "BD backups\\Movie Disc" --encoder libx265
-  py bd2hevc.py auto "BD backups\\Movie Disc" --quality cq:20 --audio-mode compact-stereo
-""")
-    p_auto.add_argument("source", help="Source BD backup folder.")
-    p_auto.add_argument("output", nargs="?", default=None, help="Output folder. Defaults to <source>_FULL_DISC_HEVC.")
-    p_auto.add_argument("--fast-bitrate", action="store_true", help="Estimate video bitrate from container data instead of summing video packets.")
-    p_auto.add_argument("--force-encode", action="store_true", help="Encode even when a video clip would normally be copied.")
-    p_auto.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth. 8 preserves 8-bit BD sources and is VLC-friendly; use 10 for explicit Main10 output.")
-    add_encoder_args(p_auto, include_encode_ahead=True)
-    add_bitrate_args(p_auto)
-    add_postprocess_args(p_auto)
-    add_audio_args(p_auto)
-    add_uhd_output_args(p_auto)
-    p_auto.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
-    p_auto.add_argument("--progress-plan", default=None, help=argparse.SUPPRESS)
-    p_auto.add_argument("--staging-dir", default=None)
-    p_auto.add_argument("--keep-staging", action="store_true")
-    p_auto.add_argument("--force", action="store_true", help="Replace an existing output folder.")
-    p_auto.add_argument("--dry-run", action="store_true")
-    p_auto.add_argument("--no-progress", action="store_true", help="Do not print live conversion progress.")
-    p_auto.add_argument("--report", default=None, help="Write the full JSON report to this path.")
-    p_auto.add_argument("--json", action="store_true", help="Print the full JSON report instead of a short summary.")
-    add_makemkv_args(p_auto)
-    p_auto.add_argument("--no-patch-navigation", action="store_true", help="Do not update CLPI/MPLS stream descriptors from AVC to HEVC.")
-    p_auto.add_argument("--no-bdj-compatibility-patches", action="store_true", help="Do not apply known disc-specific BD-J compatibility patches.")
-    add_vlc_compatibility_args(p_auto)
-    p_auto.add_argument("--verbose", action="store_true")
-    p_auto.set_defaults(func=cmd_auto)
-
-    p_start = command_parser(sub, "start", help="Start a full-disc conversion in the background.", description="Start one background conversion job and return immediately with status commands.", examples="""
-  py bd2hevc.py start "BD backups\\Movie Disc" --name Movie_Disc
-  py bd2hevc.py start "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py start "BD backups\\Movie Disc" --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
-""")
-    p_start.add_argument("source", help="Source BD backup folder.")
-    p_start.add_argument("output", nargs="?", default=None, help="Output folder. Defaults next to the source.")
-    p_start.add_argument("--name", default=None, help="Friendly job id. Defaults to timestamp plus source folder name.")
-    p_start.add_argument("--fast-bitrate", action="store_true", help="Estimate video bitrate from container data instead of summing video packets.")
-    p_start.add_argument("--force-encode", action="store_true", help="Encode even when a video clip would normally be copied.")
-    p_start.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth.")
-    add_encoder_args(p_start, include_encode_ahead=True)
-    add_bitrate_args(p_start)
-    add_postprocess_args(p_start)
-    add_audio_args(p_start)
-    add_uhd_output_args(p_start)
-    p_start.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
-    p_start.add_argument("--force", action="store_true", help="Replace an existing output folder.")
-    add_makemkv_args(p_start)
-    p_start.add_argument("--no-patch-navigation", action="store_true", help="Do not update CLPI/MPLS stream descriptors from AVC to HEVC.")
-    p_start.add_argument("--no-bdj-compatibility-patches", action="store_true", help="Do not apply known disc-specific BD-J compatibility patches.")
-    add_vlc_compatibility_args(p_start)
-    p_start.add_argument("--verbose", action="store_true")
-    p_start.set_defaults(func=cmd_start)
-
-    p_queue = command_parser(sub, "queue", help="Queue multiple full-disc conversions that run one at a time.", description="Queue one or more source folders. Jobs run one at a time in the background.", examples="""
-  py bd2hevc.py queue "BD backups\\Movie Disc" --output-dir "Converted UHD-BD"
-  py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD"
-  py bd2hevc.py queue "BD backups" --output-dir "Converted UHD-BD" --encoder libx265
-  py bd2hevc.py queue "Disc 1" "Disc 2" --output-dir "Converted UHD-BD" --quality cq:20
-  py bd2hevc.py queue "Movie Disc" --output-dir "Converted UHD-BD" --quality cq:20 --main-title-quality cq:18 --audio-mode compact-stereo
-  py bd2hevc.py queue "Episode Disc" --output-dir "Converted UHD-BD" --quality cq:20 --top-n-quality 3 cq:18
-""")
-    p_queue.add_argument("sources", nargs="+", help="Source BD backup folders or parent folders containing BDMV backups.")
-    p_queue.add_argument("--output-dir", default=None, help="Put each converted output in this folder using '<Title> (BD) (UHD converted)' names.")
-    p_queue.add_argument("--name-prefix", default=None, help="Prefix for generated job ids. Defaults to the current timestamp.")
-    p_queue.add_argument("--fast-bitrate", action="store_true", help="Estimate video bitrate from container data instead of summing video packets.")
-    p_queue.add_argument("--force-encode", action="store_true", help="Encode even when a video clip would normally be copied.")
-    p_queue.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth.")
-    add_encoder_args(p_queue, include_encode_ahead=True)
-    add_bitrate_args(p_queue)
-    add_postprocess_args(p_queue)
-    add_audio_args(p_queue)
-    add_uhd_output_args(p_queue)
-    p_queue.add_argument("--decode-sample", type=float, default=30.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
-    p_queue.add_argument("--force", action="store_true", help="Replace existing output folders.")
-    add_makemkv_args(p_queue)
-    p_queue.add_argument("--no-patch-navigation", action="store_true", help="Do not update CLPI/MPLS stream descriptors from AVC to HEVC.")
-    p_queue.add_argument("--no-bdj-compatibility-patches", action="store_true", help="Do not apply known disc-specific BD-J compatibility patches.")
-    add_vlc_compatibility_args(p_queue)
-    p_queue.add_argument("--verbose", action="store_true")
-    p_queue.set_defaults(func=cmd_queue)
-
-    p_status = command_parser(sub, "status", help="Show progress for a background conversion.", description="Show progress for the current job, a specific job, or the whole queue when watched without a job id.", examples="""
-  py bd2hevc.py status
-  py bd2hevc.py status --watch
-  py bd2hevc.py status 20260528-My_Movie --watch
-  py bd2hevc.py status 20260528-My_Movie --watch 5
-""")
-    p_status.add_argument("job", nargs="?", default=None, help="Job id, output folder, or source folder. Defaults to the newest job.")
-    p_status.add_argument("--watch", nargs="?", const=1.0, type=float, default=0, help="Refresh every N seconds. Defaults to 1 second when no interval is supplied.")
-    p_status.add_argument("--width", type=int, default=32)
-    p_status.set_defaults(func=cmd_status)
-
-    p_jobs = command_parser(sub, "jobs", help="List recent background conversions.", description="List running, queued, completed, failed, and canceled background jobs.", examples="""
-  py bd2hevc.py jobs
-  py bd2hevc.py jobs --limit 30
-  py bd2hevc.py jobs --active
-  py bd2hevc.py jobs --failed --hide-old-failed
-""")
-    p_jobs.add_argument("--limit", type=int, default=10)
-    p_jobs.add_argument("--active", action="store_true", help="Show only running, queued, and paused jobs.")
-    p_jobs.add_argument("--failed", action="store_true", help="Show only failed jobs.")
-    p_jobs.add_argument("--completed", action="store_true", help="Show only completed jobs.")
-    p_jobs.add_argument("--canceled", action="store_true", help="Show only canceled jobs.")
-    p_jobs.add_argument("--hide-old-failed", action="store_true", help="Hide failed jobs when a newer completed job has the same output folder.")
-    p_jobs.set_defaults(func=cmd_jobs)
-
-    p_pause = command_parser(sub, "pause-queue", help="Pause the background queue after the current running job.", description="Pause queued jobs. The currently running conversion is allowed to continue.", examples="""
-  py bd2hevc.py pause-queue
-  py bd2hevc.py pause-queue --reason "Need the GPU for something else"
-""")
-    p_pause.add_argument("--reason", default=None, help="Optional note saved with the pause marker.")
-    p_pause.set_defaults(func=cmd_pause_queue)
-
-    p_resume = command_parser(sub, "resume-queue", help="Resume a paused background queue.", description="Resume jobs that were paused with pause-queue.", examples="""
-  py bd2hevc.py resume-queue
-""")
-    p_resume.set_defaults(func=cmd_resume_queue)
-
-    p_cancel = command_parser(sub, "cancel", help="Cancel a queued job. Use --kill to stop a running job.", description="Cancel a queued conversion. Use --kill only when you really want to stop a running conversion process.", examples="""
-  py bd2hevc.py cancel 20260528-My_Movie
-  py bd2hevc.py cancel "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py cancel 20260528-My_Movie --kill
-""")
-    p_cancel.add_argument("job", help="Job id, output folder, or source folder.")
-    p_cancel.add_argument("--kill", action="store_true", help="Stop a running conversion process tree.")
-    p_cancel.set_defaults(func=cmd_cancel_job)
-
-    p_remove = command_parser(sub, "remove", help="Remove a job from the queue/status list without deleting converted output.", description="Hide an old job from BD2HEVC's job list. This does not delete the converted backup.", examples="""
-  py bd2hevc.py remove 20260528-My_Movie
-  py bd2hevc.py remove 20260528-My_Movie --kill
-""")
-    p_remove.add_argument("job", help="Job id, output folder, or source folder.")
-    p_remove.add_argument("--kill", action="store_true", help="Allow removal of a running job by stopping it first.")
-    p_remove.set_defaults(func=cmd_remove_job)
-
-    p_validate = command_parser(sub, "validate", help="Validate an output clip or BDMV folder.", description="Run structural and decode checks against an output clip, converted backup, or source backup.", examples="""
-  py bd2hevc.py validate "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py validate "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --reference "BD backups\\Movie Disc"
-  py bd2hevc.py validate "BD backups\\Movie Disc" --source-backup
-""")
-    p_validate.add_argument("target")
-    p_validate.add_argument("--source-backup", action="store_true", help="Validate a source BD backup without requiring HEVC output clips.")
-    p_validate.add_argument("--reference", default=None, help="Original BD backup folder to compare matching stream audio and timestamps against.")
-    p_validate.add_argument("--audio-mode", choices=AUDIO_MODES, default=DEFAULT_AUDIO_MODE, help="Expected audio handling when comparing against --reference. Use compact-stereo for AC-3 stereo/mono outputs.")
-    p_validate.add_argument("--decode-sample", type=float, default=None, help="Decode the first N seconds of video to null.")
-    p_validate.add_argument("--report", default=None, help="Write the full JSON validation report to this path.")
-    p_validate.add_argument("--json", action="store_true", help="Print the full JSON report instead of a short summary.")
-    add_makemkv_args(p_validate)
-    p_validate.add_argument("--verbose", action="store_true")
-    p_validate.set_defaults(func=cmd_validate)
-
-    p_diagnose = command_parser(sub, "diagnose", help="Create a redacted support bundle.", description="Create a shareable diagnostic zip with redacted logs, tool versions, validation output, and file manifests. Media files and raw disc assets are not included.", examples="""
-  py bd2hevc.py diagnose "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py diagnose "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --source "BD backups\\Movie Disc"
-  py bd2hevc.py diagnose "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --job 20260429-153012-Movie_Disc
-""")
-    p_diagnose.add_argument("target", help="Converted output folder, source backup folder, or clip to summarize.")
-    p_diagnose.add_argument("--source", default=None, help="Original source backup for reference validation and comparison.")
-    p_diagnose.add_argument("--job", default=None, help="Matching background job id or prefix when auto-detection is not enough.")
-    p_diagnose.add_argument("--output", default=None, help="Destination zip or folder. Defaults to reports/diagnostics/<disc>-<timestamp>.zip.")
-    p_diagnose.add_argument("--log-lines", type=int, default=DEFAULT_DIAGNOSTIC_LOG_LINES, help=f"Number of job log lines to include from the end of the log. Default {DEFAULT_DIAGNOSTIC_LOG_LINES}.")
-    p_diagnose.add_argument("--no-validation", action="store_true", help="Skip the lightweight no-MakeMKV validation pass.")
-    p_diagnose.add_argument("--no-zip", action="store_true", help="Write an unpacked diagnostic folder instead of a zip file.")
-    p_diagnose.add_argument("--json", action="store_true", help="Print machine-readable command output.")
-    p_diagnose.set_defaults(func=cmd_diagnose)
-
-    p_play = command_parser(sub, "play", help="Open a BD/UHD-BD backup in VLC with clean BD-J menu startup.", description="Launch VLC as a fresh Blu-ray menu session. This avoids VLC resume prompts, playlist enqueueing, and existing-instance reuse, which can upset some BD-J menus.", examples="""
-  py bd2hevc.py play "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py play "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --region A
-  py bd2hevc.py play "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --dry-run
-""")
-    p_play.add_argument("target", help="Converted output folder, source backup folder, or disc folder to open in VLC.")
-    p_play.add_argument("--region", choices=["A", "B", "C", "a", "b", "c"], default=None, help="Pass a Blu-ray region to VLC for this launch.")
-    p_play.add_argument("--no-bdj-persistent-storage", action="store_true", help="Disable libbluray BD-J persistent storage for this launch.")
-    p_play.add_argument("--dry-run", action="store_true", help="Print the VLC command without opening VLC.")
-    p_play.add_argument("--json", action="store_true", help="Print machine-readable command output.")
-    p_play.set_defaults(func=cmd_play)
-
-    p_record = command_parser(sub, "record-libbluray", help="Record an interactive VLC/libbluray reproduction session.", description="Open VLC visibly, let you reproduce a menu/gallery failure, then package the verbose libbluray log and safe disc metadata into a support bundle.", examples="""
-  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --source "BD backups\\Movie Disc" --label movie-gallery
-  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --region A --duration 120
-  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --isolated-bdj-storage
-  py bd2hevc.py record-libbluray "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --libbluray-debug-mask
-""")
-    p_record.add_argument("target", help="Converted output folder, source backup folder, or disc folder to open in VLC.")
-    p_record.add_argument("--source", default=None, help="Original source backup for reference file manifests.")
-    p_record.add_argument("--label", default=None, help="Short name for the recording bundle. Defaults to the disc folder name.")
-    p_record.add_argument("--output-dir", default=None, help="Folder for recording bundles. Defaults to reports/libbluray-recordings.")
-    p_record.add_argument("--region", choices=["A", "B", "C", "a", "b", "c"], default=None, help="Pass a Blu-ray region to VLC for this recording.")
-    p_record.add_argument("--duration", type=float, default=None, help="Automatically stop after N seconds instead of waiting for Enter.")
-    p_record.add_argument("--verbose-level", type=int, default=3, choices=[0, 1, 2, 3, 4], help="VLC verbosity level. Default 3 for libbluray debugging.")
-    p_record.add_argument("--isolated-bdj-storage", action="store_true", help="Run VLC with per-recording libbluray BD-J cache and persistent storage roots.")
-    p_record.add_argument("--libbluray-debug-mask", nargs="?", const="0x3e940", default=None, help="Also set BD_DEBUG_FILE and BD_DEBUG_MASK for a direct libbluray log. With no value, captures CRIT, BluRay, NAV, BD-J, stream, graphics, decode, and JNI categories.")
-    p_record.add_argument("--no-zip", action="store_true", help="Write an unpacked recording folder instead of a zip.")
-    p_record.add_argument("--dry-run", action="store_true", help="Show the VLC command and bundle path without opening VLC.")
-    p_record.add_argument("--json", action="store_true", help="Print machine-readable command output.")
-    p_record.set_defaults(func=cmd_record_libbluray)
-
-    p_playlist = command_parser(sub, "playlist-probe", help="Probe a Blu-ray playlist through libbluray/FFprobe and fail on stale CLPI packet maps.", description="Probe one MPLS playlist through libbluray/FFprobe, useful when VLC progress or seeking looks wrong.", examples="""
-  py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23
-  py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23 --reference "BD backups\\Movie Disc"
-  py bd2hevc.py playlist-probe "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --playlist 23 --count-frames --decode-seconds 30
-""")
-    p_playlist.add_argument("target", help="BD/UHD-BD backup folder.")
-    p_playlist.add_argument("--playlist", type=int, required=True, help="MPLS playlist number, e.g. 23 for 00023.mpls.")
-    p_playlist.add_argument("--reference", default=None, help="Original BD backup folder to compare playlist duration against.")
-    p_playlist.add_argument("--reference-tolerance", type=float, default=2.0, help="Allowed duration difference from --reference, in seconds.")
-    p_playlist.add_argument("--min-duration", type=float, default=None)
-    p_playlist.add_argument("--max-duration", type=float, default=None)
-    p_playlist.add_argument("--count-frames", action="store_true", help="Ask FFprobe to count decoded video frames.")
-    p_playlist.add_argument("--min-video-frames", type=int, default=None, help="Require at least this many decoded video frames.")
-    p_playlist.add_argument("--decode-seconds", type=float, default=None, help="Decode this many seconds of playlist video with FFmpeg.")
-    p_playlist.add_argument("--allow-eof", action="store_true", help="Do not fail when libbluray reports Read past EOF.")
-    p_playlist.add_argument("--report", default=None, help="Optional JSON report path.")
-    p_playlist.set_defaults(func=cmd_playlist_probe)
-
-    p_metadata = command_parser(sub, "patch-disc-metadata", help="Create fallback BD disc-library metadata when a backup is missing it.", description="Create simple BD disc-library metadata so VLC shows a disc title instead of a file URL.", examples="""
-  py bd2hevc.py patch-disc-metadata "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py patch-disc-metadata "Converted UHD-BD" --force
-  py bd2hevc.py patch-disc-metadata "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --title "Movie Disc"
-""")
-    p_metadata.add_argument("paths", nargs="+", help="Disc folders or a parent folder containing disc folders.")
-    p_metadata.add_argument("--title", default=None, help="Use this title for every patched disc. Defaults to a cleaned folder name.")
-    p_metadata.add_argument("--force", action="store_true", help="Overwrite existing bdmt_*.xml metadata.")
-    p_metadata.set_defaults(func=cmd_patch_disc_metadata)
-
-    p_uhd_profile = command_parser(sub, "patch-uhd-profile", help="Patch an existing output toward UHD-BD folder conventions.", description="Create expected UHD-BD-style folders and mirror required backup files. Library mode restores BD-style navigation headers for VLC compatibility; disc mode patches headers toward UHD.", examples="""
-  py bd2hevc.py patch-uhd-profile "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py patch-uhd-profile "Converted UHD-BD"
-  py bd2hevc.py patch-uhd-profile "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --uhd-profile disc --json
-""")
-    p_uhd_profile.add_argument("paths", nargs="+", help="Disc folders or a parent folder containing disc folders.")
-    p_uhd_profile.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="library restores BD-style 0200 headers; disc patches headers toward 0300 UHD-style values.")
-    p_uhd_profile.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_uhd_profile.set_defaults(func=cmd_patch_uhd_profile)
-
-    p_patch = command_parser(sub, "patch-navigation", help="Patch full-disc CLPI/MPLS descriptors for HEVC replacement clips.", description="Patch Blu-ray navigation metadata after HEVC replacement so players see the new video streams correctly.", examples="""
-  py bd2hevc.py patch-navigation "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --reference "BD backups\\Movie Disc"
-  py bd2hevc.py patch-navigation "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001 00002
-""")
-    p_patch.add_argument("target")
-    p_patch.add_argument("--clips", nargs="*", default=None, help="Clip filenames or ids to mark as HEVC. Defaults to HEVC clips over 10 seconds.")
-    p_patch.add_argument("--reference", default=None, help="Original BD backup. When supplied, source CLPI files are restored, patched to HEVC, and their CPI packet maps are scaled to the output streams.")
-    p_patch.add_argument("--refresh-cpi", action="store_true", default=False, help="Experimental: splice tsMuxer-generated CPI blocks into CLPI files. Normally leave this off.")
-    p_patch.add_argument("--no-refresh-cpi", action="store_false", dest="refresh_cpi", help=argparse.SUPPRESS)
-    p_patch.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="library keeps BD-style navigation version headers; disc patches CLPI/MPLS version headers toward UHD.")
-    p_patch.add_argument("--verbose", action="store_true")
-    p_patch.set_defaults(func=cmd_patch_navigation)
-
-    p_remux = command_parser(sub, "remux-replacements", help="Remux existing HEVC replacement clips with the current converter M2TS authoring rules.", description="Rebuild replacement M2TS files without reencoding their existing HEVC video.", examples="""
-  py bd2hevc.py remux-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py remux-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001 00002
-""")
-    p_remux.add_argument("source", help="Original BD backup folder.")
-    p_remux.add_argument("output", help="Converted full-disc output folder.")
-    p_remux.add_argument("--clips", nargs="*", default=None, help="Clip filenames or ids to remux. Defaults to HEVC clips over 10 seconds.")
-    p_remux.add_argument("--verbose", action="store_true")
-    p_remux.set_defaults(func=cmd_remux_replacements)
-
-    p_reencode = command_parser(sub, "reencode-replacements", help="Reencode selected replacement clips in an existing full-disc output.", description="Reencode selected clips in an existing converted output, then remux and repatch navigation.", examples="""
-  py bd2hevc.py reencode-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001
-  py bd2hevc.py reencode-replacements "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001 --bitrate-mode compact-cq --compact-cq-value 20
-""")
-    p_reencode.add_argument("source", help="Original BD backup folder.")
-    p_reencode.add_argument("output", help="Converted full-disc output folder.")
-    p_reencode.add_argument("--clips", nargs="+", required=True, help="Clip filenames or ids to reencode.")
-    p_reencode.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="HEVC output bit depth.")
-    add_encoder_args(p_reencode)
-    add_bitrate_args(p_reencode)
-    p_reencode.add_argument("--decode-sample", type=float, default=10.0, help="Decode N seconds of each reencoded output clip during validation. Use 0 to skip.")
-    p_reencode.add_argument("--verbose", action="store_true")
-    p_reencode.set_defaults(func=cmd_reencode_replacements)
-
-    p_audio_repair = command_parser(sub, "repair-compact-audio", help="Convert non-compact audio in an existing full-disc output to AC-3 without reencoding video.", description="Repair an existing converted backup in place. Video and subtitles are stream-copied, playable audio is converted to compact AC-3 mono/stereo, CLPI/MPLS metadata is updated, and each clip rolls back if validation fails. The original source backup is not required.", examples=r"""
-  py bd2hevc.py repair-compact-audio "Converted UHD-BD\Movie Disc (BD) (UHD converted)" --dry-run
-  py bd2hevc.py repair-compact-audio "Converted UHD-BD\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py repair-compact-audio "Converted UHD-BD\Movie Disc (BD) (UHD converted)" --clips 00004 00012 --require-makemkv
-""")
-    p_audio_repair.add_argument("target", help="Existing converted BD/UHD-BD backup folder to repair in place.")
-    p_audio_repair.add_argument("--clips", nargs="*", default=None, help="Optional clip filenames or ids to inspect. Defaults to every M2TS clip and repairs only audio that does not already match the compact target.")
-    p_audio_repair.add_argument("--stereo-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_STEREO_AUDIO_BITRATE, help="Bitrate for two-channel AC-3 audio. Default 256k.")
-    p_audio_repair.add_argument("--mono-audio-bitrate", type=parse_bitrate_arg, default=DEFAULT_MONO_AUDIO_BITRATE, help="Bitrate for mono AC-3 audio. Default 128k.")
-    p_audio_repair.add_argument("--decode-sample", type=float, default=10.0, help="Decode N seconds of each repaired output clip during validation. Use 0 to skip.")
-    p_audio_repair.add_argument("--uhd-profile", choices=["library", "disc", "auto", "off"], default="library", help="library keeps BD-style navigation headers; disc patches repaired navigation headers toward UHD-style versions.")
-    add_makemkv_args(p_audio_repair)
-    p_audio_repair.add_argument("--dry-run", action="store_true", help="Show clips that need compact-audio repair without changing files.")
-    p_audio_repair.add_argument("--report", default=None, help="Write the full JSON plan or repair report to this path.")
-    p_audio_repair.add_argument("--json", action="store_true", help="Print the full JSON plan or repair report.")
-    p_audio_repair.add_argument("--verbose", action="store_true")
-    p_audio_repair.set_defaults(func=cmd_repair_compact_audio)
-
-    p_repair = command_parser(sub, "repair-output", help="Automatically repair an existing converted full-disc output.", description="Inspect and repair an existing converted backup using the current replacement and navigation rules.", examples="""
-  py bd2hevc.py repair-output "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py repair-output "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --dry-run
-  py bd2hevc.py repair-output "BD backups\\Movie Disc" "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --clips 00001
-""")
-    p_repair.add_argument("source", help="Original BD backup folder.")
-    p_repair.add_argument("output", help="Converted full-disc output folder.")
-    p_repair.add_argument("--clips", nargs="*", default=None, help="Optional clip filenames or ids to force-reencode. Defaults to wrong-bit-depth replacements.")
-    p_repair.add_argument("--hevc-bit-depth", type=int, choices=[8, 10], default=8, help="Desired HEVC output bit depth.")
-    add_encoder_args(p_repair)
-    add_bitrate_args(p_repair)
-    p_repair.add_argument("--decode-sample", type=float, default=10.0, help="Decode N seconds of each repaired output clip during validation. Use 0 to skip.")
-    p_repair.add_argument("--dry-run", action="store_true")
-    p_repair.add_argument("--json", action="store_true", help="Print the full JSON report instead of a short summary.")
-    p_repair.add_argument("--verbose", action="store_true")
-    p_repair.set_defaults(func=cmd_repair_output)
-
-    p_vlc_patch = command_parser(sub, "patch-vlc-compat", help="Apply modular VLC/libbluray compatibility fixes to an existing output.", description="Apply optional BD-J compatibility patches to an already converted backup.", examples="""
-  py bd2hevc.py patch-vlc-compat "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py patch-vlc-compat "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --vlc-fix topmenu-mark-zero-on-return
-  py bd2hevc.py patch-vlc-compat "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --vlc-compat off
-""")
-    p_vlc_patch.add_argument("target", help="BD/UHD-BD backup folder.")
-    add_vlc_compatibility_args(p_vlc_patch)
-    p_vlc_patch.add_argument("--json", action="store_true", help="Print the full JSON report.")
-    p_vlc_patch.set_defaults(func=cmd_patch_vlc_compat)
-
-    p_vlc = command_parser(sub, "vlc-smoke", help="Headless VLC/libbluray startup smoke test; does not open a visible video window.", description="Run a short VLC startup test against a BD/UHD-BD backup without opening a visible VLC window.", examples="""
-  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)"
-  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --seconds 45 --video-plane
-  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --video-plane --isolated-bdj-storage
-  py bd2hevc.py vlc-smoke "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --d3d11
-""")
-    p_vlc.add_argument("target", help="BD/UHD-BD backup folder.")
-    p_vlc.add_argument("--seconds", type=float, default=35.0, help="How long VLC should run before exiting. Default 35 seconds for slower BD-J startup screens.")
-    p_vlc.add_argument("--log", default=None, help="VLC log path. Defaults to reports/<disc>.vlc_headless_smoke.log.")
-    p_vlc.add_argument("--video-plane", action="store_true", help="Use VLC dummy video output instead of --no-video, exercising video/subpicture paths without opening a visible window.")
-    p_vlc.add_argument("--d3d11", action="store_true", help="Force VLC's D3D11VA decoder path and fail on known D3D11 video-freeze warnings.")
-    p_vlc.add_argument("--allow-resume", action="store_true", help="Allow VLC to resume remembered playback state instead of forcing menu startup.")
-    p_vlc.add_argument("--region", choices=["A", "B", "C", "a", "b", "c"], default=None, help="Pass a Blu-ray region to VLC for this smoke test.")
-    p_vlc.add_argument("--isolated-bdj-storage", action="store_true", help="Run VLC with a fresh libbluray BD-J cache/persistent-storage root for this smoke test.")
-    p_vlc.add_argument("--no-bdj-persistent-storage", action="store_true", help="Disable libbluray BD-J persistent storage for this smoke test.")
-    p_vlc.add_argument("--verbose", action="store_true")
-    p_vlc.set_defaults(func=cmd_vlc_smoke)
-
-    p_progress = command_parser(sub, "progress", help="Show a progress bar for a running full-disc conversion.", description="Low-level progress command used by older workflows. For background jobs, prefer 'status --watch'.", examples="""
-  py bd2hevc.py progress "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --plan reports\\jobs\\job.plan.json
-  py bd2hevc.py progress "Converted UHD-BD\\Movie Disc (BD) (UHD converted)" --plan reports\\jobs\\job.plan.json --log reports\\jobs\\job.log --watch
-""")
-    p_progress.add_argument("target", help="Output BD folder being written.")
-    p_progress.add_argument("--plan", required=True, help="Dry-run JSON produced before the matching conversion.")
-    p_progress.add_argument("--log", default=None, help="Optional conversion log for current-clip progress.")
-    p_progress.add_argument("--width", type=int, default=32)
-    p_progress.add_argument("--watch", nargs="?", const=1.0, type=float, default=0, help="Refresh every N seconds until stopped. Defaults to 1 second when no interval is supplied.")
-    p_progress.set_defaults(func=cmd_progress)
-    return parser
+    from . import cli_parser
+    return cli_parser.build_parser(services=sys.modules[__name__])
 
 
 def add_convert_args(parser: argparse.ArgumentParser, *, source_optional: bool = False, output_optional: bool = False) -> None:
@@ -3684,6 +3204,7 @@ def add_convert_args(parser: argparse.ArgumentParser, *, source_optional: bool =
     add_encoder_args(parser, include_encode_ahead=True)
     add_bitrate_args(parser)
     add_postprocess_args(parser)
+    add_iso_output_args(parser)
     parser.add_argument("--skip-audio", action="store_true", help="Diagnostic only: mux video without audio tracks.")
     parser.add_argument("--skip-subtitles", action="store_true", help="Mux audio only with the encoded video; omit PGS subtitle tracks.")
     parser.add_argument("--patch-navigation", action=argparse.BooleanOptionalAction, default=True, help="In clone-streams mode, update CLPI/MPLS primary video descriptors from AVC to HEVC for reencoded clips.")

@@ -87,18 +87,29 @@ The current built-in VLC fixes are `music-jukebox-queued-state` and
 `topmenu-mark-zero-on-return`. Auto detection applies each fix only when the
 matching BD-J bytecode signature is present.
 
-`music-jukebox-queued-state` handles a Warner-style music jukebox helper where
-the button starts the music-jukebox state before queuing the matching jukebox
-menu buttons. The compatibility patch keeps the same helper method and state
-name, but first queues the disc's own previous-menu close/show calls, queues
-the authored jukebox popup and track group together, and only then queues the
-state change so VLC/libbluray has the track-picker menu in place before playlist
-selection. When extracted Warner menu resource folders are present, the patch
-also appends the existing playlist radio group to the existing jukebox popup's
-children list; it does not generate art, add z-index overrides, or create a new
-background layer. The state handler is also guarded so if VLC/libbluray reaches
-the music-jukebox state with no current button, the disc's authored default
-track button is restored before the original playback-helper logic runs.
+For the recognized Matrix 41-track edition, `music-jukebox-queued-state`
+dispatches to `wb_jukebox.py`. Earlier repeated-overlay-redraw trials did not
+resolve the problem. The v2 helper queues its menu display after the state's
+startup operation, preserving the original popup and separate song group.
+The state defers playlist selection until playback is requested and cancels
+the authored ten-second group-hiding timer on input.
+
+The original jukebox seeks between six play items in playlist 00051. VLC can
+lose the VC-1 reference picture during those transitions, producing a corrupt
+background even with software decoding. The repair creates playlists
+01801–01806, each with one unchanged PlayItem and stream table. Song selection
+stops playback, selects the corresponding playlist and audio stream, then
+starts playback without a seek. Track deadlines are translated from the
+combined timeline to each clip's local timeline using the MPLS durations.
+A generation-checked timer advances songs without letting canceled tasks
+interfere with later selections. The authored Play All and Exit helpers remain.
+
+No M2TS or CLPI bytes are changed. The installer verifies the edition and
+class hashes, recovers recognized legacy modifications from verified local
+backups, prepares every edit before writing, and is idempotent. Compatibility
+Java sources and their rebuild command are under `tools/wb-jukebox`; the
+embedded payload contains only BD2HEVC glue code. Other Warner signatures
+continue through the older compatibility path.
 
 `topmenu-mark-zero-on-return` was developed against a disc with a VLC-only
 top-menu redraw failure, but auto detection applies it to other discs only when

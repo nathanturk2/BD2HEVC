@@ -14,17 +14,25 @@ from .bitrate import format_duration
 from .tools import ToolError
 
 
-def make_output_available(output: Path, source: Path, *, force: bool) -> None:
+def validate_output_available(output: Path, source: Path, *, force: bool) -> None:
+    """Check an output without removing a previous conversion."""
     output = output.resolve()
     source = source.resolve()
     if output == source or source in output.parents:
         raise ToolError("Refusing to write output inside the source backup")
+    if output in source.parents:
+        raise ToolError("Refusing to replace an output directory containing the source backup")
     anchor = Path(output.anchor)
     if output.anchor and not anchor.exists():
         raise ToolError(f"Output drive or root does not exist: {output.anchor}")
+    if output.exists() and not force:
+        raise ToolError(f"Output already exists: {output}. Use --force to replace it.")
+
+
+def make_output_available(output: Path, source: Path, *, force: bool) -> None:
+    validate_output_available(output, source, force=force)
+    output = output.resolve()
     if output.exists():
-        if not force:
-            raise ToolError(f"Output already exists: {output}. Use --force to replace it.")
         generated_disc_name = "(uhd converted)" in output.name.lower()
         if len(output.parts) < 4 and not (len(output.parts) >= 3 and generated_disc_name):
             raise ToolError(f"Refusing to remove suspicious output path: {output}")
@@ -104,6 +112,30 @@ def default_output_for(source: Path, mode: str) -> Path:
     return source.resolve().parent / f"{source.name}_{suffix}"
 
 
+def generated_output_name(source_name: str, *, add_tags: bool = True) -> str:
+    """Build an automatic output name without rewriting the source name."""
+    if not add_tags:
+        return source_name
+
+    name = source_name
+    folded = name.casefold()
+    if "(bd)" not in folded:
+        name += " (BD)"
+    if "(uhd converted)" not in folded:
+        name += " (UHD converted)"
+    return name
+
+
+def generated_output_for(source: Path, output_dir: Path, *, add_tags: bool = True) -> Path:
+    """Return a safe generated output path while preserving the source basename."""
+    output_dir = output_dir.expanduser().resolve()
+    target = output_dir / generated_output_name(source.name, add_tags=add_tags)
+    if target.resolve() == source.expanduser().resolve():
+        # A tag-free output beside its source must not overwrite the source tree.
+        target = output_dir / f"{source.name} HEVC"
+    return target
+
+
 def safe_name(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
     cleaned = cleaned.strip("._-")
@@ -124,7 +156,7 @@ def conversion_succeeded(result: dict[str, Any], *, require_makemkv: bool = Fals
         makemkv = result.get("makemkv_validation")
         return not (require_makemkv and makemkv and not makemkv.get("ok"))
     if mode == "clone-streams":
-        if not all(v.get("ok") for v in result.get("validation", [])):
+        if not result.get("validation") or not all(v.get("ok") for v in result.get("validation", [])):
             return False
         makemkv = result.get("makemkv_validation") or {}
         return not (require_makemkv and not makemkv.get("ok"))

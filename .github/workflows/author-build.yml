@@ -1,0 +1,19 @@
+name: Bundled author source build
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  rust:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.0"
+      - run: cargo test --locked
+        working-directory: tools/hadris-udf/streaming-src/hadris-udf-cli-2.2.0
+      - run: cargo test --locked --features write
+        working-directory: tools/hadris-udf/streaming-src/hadris-udf-2.2.0
+      - run: cargo build --release --locked --bin hadris-udf
+        working-directory: tools/hadris-udf/streaming-src/hadris-udf-cli-2.2.0

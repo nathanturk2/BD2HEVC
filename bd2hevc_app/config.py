@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.1.0"
+from .paths import ROOT, REPORT_ROOT, STATE_ROOT
+VERSION = "0.2.0a2"
 
 LOCAL_TSMUXERS = [
     ROOT / "tools" / "tsmuxer-2.7.0" / "tsMuxeR.exe",
@@ -29,7 +29,7 @@ VLC_DIRS = [
     Path(r"C:\Program Files (x86)\VideoLAN\VLC"),
 ]
 
-DEFAULT_REPORT_DIR = ROOT / "reports"
+DEFAULT_REPORT_DIR = REPORT_ROOT
 DEFAULT_JOB_DIR = DEFAULT_REPORT_DIR / "jobs"
 QUEUE_PAUSE_FILE = DEFAULT_JOB_DIR / "queue.paused"
 
@@ -54,6 +54,7 @@ HEVC_ENCODERS = ("hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265")
 HARDWARE_HEVC_ENCODERS = {"hevc_nvenc", "hevc_qsv", "hevc_amf"}
 
 DEINTERLACE_MODES = ("off", "auto", "force")
+DEFAULT_DEINTERLACE_MODE = "auto"
 DEINTERLACE_FILTERS = ("bwdif", "yadif")
 INTERLACED_FIELD_ORDERS = {
     "tt",
@@ -86,7 +87,7 @@ MPLS_PRIMARY_VIDEO_MPEG2 = bytes.fromhex("090110110000000000000502")
 HSCENE_MENU_START_SET_VISIBLE = bytes.fromhex("b2002704b60058")
 DEFAULT_VLC_COMPATIBILITY_MODE = "auto"
 KNOWN_VLC_COMPATIBILITY_FIXES = {
-    "music-jukebox-queued-state": "Close the previous Warner BD-J menu stack, render the authored music-jukebox popup/group together, queue the state change, and restore the default track focus if VLC/libbluray loses it.",
+    "music-jukebox-queued-state": "Stabilize Warner music jukebox entry and focus. The matching Matrix edition also keeps song controls visible and uses independent playlists to avoid VLC VC-1 seek corruption.",
     "topmenu-mark-zero-on-return": "Normalize matching BD-J top-menu playlist returns to start at the menu entry point instead of a stale positive playmark.",
 }
 VLC_COMPATIBILITY_FIX_ALIASES = {}

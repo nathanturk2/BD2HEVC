@@ -15,6 +15,7 @@ from .progress import normalize_clip_name, output_matches_hevc_bit_depth
 from .scan import inspect_clip
 from .tools import ToolError, format_cmd
 from .validation import validate_clip
+from .repair_transaction import publish_repair, recover_repairs
 
 
 def duration_match_tolerance(duration: float | None) -> float:
@@ -31,6 +32,7 @@ def remux_replacement_clip(
     *,
     verbose: bool = False,
 ) -> dict[str, Any]:
+    recover_repairs(output_clip, output_clpi)
     if not source_clip.exists():
         raise ToolError(f"Source clip is missing for remux repair: {source_clip}")
     if not output_clip.exists():
@@ -57,11 +59,16 @@ def remux_replacement_clip(
             reference_clip_info=source_clip_info,
             verbose=verbose,
         )
-        replace_report = replace_file_with_retry(temp_output, output_clip, verbose=verbose)
+        validation = validate_clip(source_clip, temp_output, tools,
+            decode_seconds=decode_sample if "decode_sample" in locals() else None, require_hevc="always")
+        if not validation.get("ok"):
+            raise ToolError("Repaired clip failed validation; original clip has been preserved")
+        temp_clpi = output_clpi.with_name(output_clpi.name + ".repair.tmp")
+        clpi_report = restore_source_clpi(source_clip, temp_clpi, output_clip=temp_output)
+        replace_report = publish_repair(temp_output, temp_clpi, output_clip, output_clpi)
     finally:
         if replace_report and temp_output.exists():
             temp_output.unlink(missing_ok=True)
-    clpi_report = restore_source_clpi(source_clip, output_clpi, output_clip=output_clip)
     repaired = inspect_clip(output_clip, tools, accurate_video_bitrate=False)
     return {
         "clip": output_clip.name,
@@ -95,6 +102,7 @@ def reencode_replacement_clip(
     bitrate_options: dict[str, Any] | None = None,
     verbose: bool = False,
 ) -> dict[str, Any]:
+    recover_repairs(output_clip, output_clpi)
     if not source_clip.exists():
         raise ToolError(f"Source clip is missing for reencode repair: {source_clip}")
     source_clip_info = inspect_clip(source_clip, tools, accurate_video_bitrate=False, bitrate_options=bitrate_options)
@@ -127,12 +135,17 @@ def reencode_replacement_clip(
             reference_clip_info=source_clip_info,
             verbose=verbose,
         )
-        replace_report = replace_file_with_retry(temp_output, output_clip, verbose=verbose)
+        validation = validate_clip(source_clip, temp_output, tools,
+            decode_seconds=decode_sample if "decode_sample" in locals() else None, require_hevc="always")
+        if not validation.get("ok"):
+            raise ToolError("Repaired clip failed validation; original clip has been preserved")
+        temp_clpi = output_clpi.with_name(output_clpi.name + ".repair.tmp")
+        clpi_report = restore_source_clpi(source_clip, temp_clpi, output_clip=temp_output)
+        replace_report = publish_repair(temp_output, temp_clpi, output_clip, output_clpi)
     finally:
         temp_video.unlink(missing_ok=True)
         if replace_report and temp_output.exists():
             temp_output.unlink(missing_ok=True)
-    clpi_report = restore_source_clpi(source_clip, output_clpi, output_clip=output_clip)
     validation = validate_clip(source_clip, output_clip, tools, decode_seconds=decode_sample, require_hevc="always")
     repaired = inspect_clip(output_clip, tools, accurate_video_bitrate=False)
     return {

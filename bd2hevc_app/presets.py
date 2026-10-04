@@ -18,6 +18,7 @@ from .config import (
     ANIME_CQ_VALUE,
     DEFAULT_ANIME_CQ_MIN_DURATION,
     DEFAULT_AUDIO_MODE,
+    DEFAULT_DEINTERLACE_MODE,
     DEFAULT_MONO_AUDIO_BITRATE,
     DEFAULT_STEREO_AUDIO_BITRATE,
     DEINTERLACE_FILTERS,
@@ -232,7 +233,8 @@ def apply_named_preset_to_args(args: argparse.Namespace) -> dict[str, Any] | Non
         deinterlace = first_present(data, "deinterlace")
         if deinterlace is not None and deinterlace not in DEINTERLACE_MODES:
             raise ToolError(f"Preset deinterlace must be one of: {', '.join(DEINTERLACE_MODES)}")
-        set_if_default(args, "deinterlace", deinterlace, "off")
+        if not getattr(args, "deinterlace_explicit", False):
+            set_if_default(args, "deinterlace", deinterlace, DEFAULT_DEINTERLACE_MODE)
     if hasattr(args, "deinterlace_filter"):
         deinterlace_filter = first_present(data, "deinterlace_filter")
         if deinterlace_filter is not None and deinterlace_filter not in DEINTERLACE_FILTERS:
@@ -293,7 +295,7 @@ def preset_data_from_args(args: argparse.Namespace) -> dict[str, Any]:
     put_if_set(data, "clip_bitrate_mode", getattr(args, "clip_bitrate_mode", None))
     put_if_set(data, "clip_cq", getattr(args, "clip_cq", None))
     put_if_set(data, "copy_clips", getattr(args, "copy_clips", None))
-    put_if_set(data, "deinterlace", getattr(args, "deinterlace", "off"), "off")
+    data["deinterlace"] = getattr(args, "deinterlace", DEFAULT_DEINTERLACE_MODE)
     put_if_set(data, "deinterlace_filter", getattr(args, "deinterlace_filter", "bwdif"), "bwdif")
     put_if_set(data, "deinterlace_clips", getattr(args, "deinterlace_clips", None))
     put_if_set(data, "no_deinterlace_clips", getattr(args, "no_deinterlace_clips", None))

@@ -48,6 +48,22 @@ def parse_tsmuxer_tracks(input_path: Path, tools: dict[str, Any], *, verbose: bo
     return [t for t in tracks if t.get("stream_id")]
 
 
+
+def tsmuxer_track_options(track: dict[str, str]) -> list[str]:
+    """Keep input selection, language and the role reported by tsMuxeR.
+
+    `track` selects an input stream; it does not preserve its output PID.
+    tsMuxeR allocates primary and secondary audio PIDs separately, so dropping
+    Secondary changes both the PID and stream type of passthrough audio.
+    A codec alone cannot identify the role: DD+ can also be primary audio.
+    """
+    options = [f"track={track.get('track')}"]
+    if track.get("stream_lang"):
+        options.append(f"lang={track['stream_lang']}")
+    if track.get("stream_id", "").startswith("A_") and track.get("secondary") == "1":
+        options.append("secondary")
+    return options
+
 def write_tsmuxer_meta(input_path: Path, meta_path: Path, clip_info: dict[str, Any], tools: dict[str, Any]) -> list[dict[str, str]]:
     tracks = parse_tsmuxer_tracks(input_path, tools)
     video = clip_info.get("video") or {}
@@ -59,10 +75,7 @@ def write_tsmuxer_meta(input_path: Path, meta_path: Path, clip_info: dict[str, A
     for track in tracks:
         stream_id = track.get("stream_id", "")
         track_id = track.get("track")
-        lang = track.get("stream_lang")
-        options = [f"track={track_id}"]
-        if lang:
-            options.append(f"lang={lang}")
+        options = tsmuxer_track_options(track)
         if stream_id.startswith("V_"):
             if stream_id != "V_MPEGH/ISO/HEVC":
                 continue
@@ -117,10 +130,7 @@ def write_tsmuxer_split_meta(
         track_id = track.get("track")
         if not track_id:
             continue
-        lang = track.get("stream_lang")
-        options = [f"track={track_id}"]
-        if lang:
-            options.append(f"lang={lang}")
+        options = tsmuxer_track_options(track)
         if stream_id == "S_HDMV/PGS":
             if not include_subtitles:
                 continue
@@ -182,10 +192,7 @@ def write_tsmuxer_m2ts_split_meta(
             track_id = track.get("track")
             if not track_id:
                 continue
-            lang = track.get("stream_lang")
-            options = [f"track={track_id}"]
-            if lang:
-                options.append(f"lang={lang}")
+            options = tsmuxer_track_options(track)
             source = audio_tracks_input or tracks_input
             lines.append(f"{stream_id}, {quote_meta_path(source)}, " + ", ".join(options))
     for track in tracks:
@@ -195,10 +202,7 @@ def write_tsmuxer_m2ts_split_meta(
         track_id = track.get("track")
         if not track_id:
             continue
-        lang = track.get("stream_lang")
-        options = [f"track={track_id}"]
-        if lang:
-            options.append(f"lang={lang}")
+        options = tsmuxer_track_options(track)
         if stream_id == "S_HDMV/PGS":
             options.extend([f"fps={fps:.3f}", f"video-width={width}", f"video-height={height}"])
         else:

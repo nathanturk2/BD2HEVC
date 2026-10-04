@@ -1,0 +1,522 @@
+{
+  "schema": "bd2hevc-hadris-build-v1",
+  "upstream_repository": "https://github.com/hxyulin/hadris",
+  "upstream_revision": "9cdad525eede26e5cf720734ca436c51f24dad08",
+  "fork_version": "2.2.0-bd2hevc.5",
+  "rust_toolchain": "1.98.0",
+  "host": "x86_64-pc-windows-msvc",
+  "build_command": "cargo build --release --locked --bin hadris-udf",
+  "licence": "MIT; LICENSE-MIT",
+  "binary_sha256": "ce2dd3020caf386772fcc7e74cdeffb5e26178be5a821b470b10722068e24943",
+  "files": [
+    {
+      "path": "bin/hadris-udf.exe",
+      "sha256": "ce2dd3020caf386772fcc7e74cdeffb5e26178be5a821b470b10722068e24943"
+    },
+    {
+      "path": "LICENSE-MIT",
+      "sha256": "0654ad57f04a7ecee22e11573d993bc96fb264c9a6167240ed803b98cacc4c6e"
+    },
+    {
+      "path": "README.md",
+      "sha256": "2cd91d7bb2e20843b386ea1bdb04f74c2b7a578c959176b613a716613a6d4122"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/Cargo.lock",
+      "sha256": "6812e96d3f97f9638d76bb3252153495a3b6b496c13cc8e0d4f4bae7db8a7a2b"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/Cargo.toml",
+      "sha256": "9a4ef10a58ac737359157dcc2b5deaf89223660b9b748e2f1bb615f668dfc4e6"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/README.md",
+      "sha256": "401c58015cdb9f231e51d93ed50b4e4e5426948a08b722f92c16ee30d94b90c1"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/descriptor/anchor.rs",
+      "sha256": "56da7ea9bc8c541f243d4bc87a124aa1396faf93105d7694f169338620b9e5e6"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/descriptor/fileset.rs",
+      "sha256": "f44bb67aab7860cb59bb5773e11d9d0c77238b85d6ce6a645a165ae9be42a7d7"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/descriptor/logical.rs",
+      "sha256": "6e6051fe5cb315a1f77233c70258e9243d87a2113c9a40487157b1bcfba0af46"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/descriptor/mod.rs",
+      "sha256": "aa0a1d7c81e53f2cc653af365c8962a497aa783c5df6aa06fea13cc4857ecd9b"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/descriptor/partition.rs",
+      "sha256": "f3e87aada8164abd25ba0df7d5a090674154b4abc6dab9c05f68b7a6b4d9b515"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/descriptor/primary.rs",
+      "sha256": "b5dd2fefbc566ef39893f9fe9be196380985192e208d07c1d2f6151a2ca72a2f"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/descriptor/tag.rs",
+      "sha256": "ff1862da14fa3b1f0e15781f1bff39eb9e30765598f21fb465142adbfcb3ace8"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/dir.rs",
+      "sha256": "4aa0812728d31bc73cf3b1b60b5bc1f65a24eb401f2cb2361bfea30d5ae19ec9"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/error.rs",
+      "sha256": "fbd5a1bc1f014d0a740d813a06ad5c349715c8f9f2dcdee0f3b2d11e3ebe7288"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/file.rs",
+      "sha256": "1f77ffab564d185193fc74bccb022f43379663e09439300b0917bd05621ae182"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/fs.rs",
+      "sha256": "e8a293408c560120691b8ba0222fca87af6ab8f50e0be95f2f663f7c627a7fc3"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/lib.rs",
+      "sha256": "943a7ef756b17e1ffda49738aee5255d8fdcf12a1f991dec3cec2c295a772e8d"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/modify.rs",
+      "sha256": "2f9d5f488cf05ffc49dc1ca3cd0f75d700817b32d8ed2410bec9f740ec3e5408"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/time.rs",
+      "sha256": "430a365a8c71763937b8e85da30fc2443823f57a65baf55950388fd9024de039"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/src/write/mod.rs",
+      "sha256": "5c0248a86639460d77a9812bae594ca994b84feb536b2e58033b92dc66fe1e2d"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/tests/async_read.rs",
+      "sha256": "74847622973d84f144f6a7f36ce8677f2050e0b75c1ec9d7abb870452dd15596"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/tests/comprehensive_udf.rs",
+      "sha256": "7175ec0fb5b692c11246b2b16ab12de1a15c59e87408b24a8e504dad64ad19e3"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/tests/integration_external.rs",
+      "sha256": "904e4fe7f091c1390381bc086c51cdd6e6b01c3ee7c49974df7cc4c61b65310b"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/tests/poc_audit_udf.rs",
+      "sha256": "40fd1eafc3856f3e8ed9fd2e12e2f1a7c021eedd3b8d894360e5827a951da865"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/tests/poc_fuzz_udf.rs",
+      "sha256": "2424dd6a6bf63b8a34362cad86eb23c7f8eb06990fd4680f033c4f4d884c110a"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/Cargo.lock",
+      "sha256": "b051d32d2e1503d27e5b6b7ed096c80f830440217a85e0be2240fb598b9de78a"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/Cargo.toml",
+      "sha256": "59057fd0abe3d441696e26c9b408061a933714b00a251bb4e7b4934b4014a175"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/README.md",
+      "sha256": "9560a56bfe9af5f210ef2a7d51390410f465310add54dbb7b3dba5f8c263da37"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/app.rs",
+      "sha256": "f5f262f9bb425ab4563ca48321fef66f093962e6cdd6dbb07f3beb39f2f8bfd9"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/args.rs",
+      "sha256": "1aa8f4da5c3d47a6a8646d7bacd824fb27e71d3010ac3ff02e6bb19642bead3d"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/bin/hadris-udf-cli.rs",
+      "sha256": "bc2916e690076d1af90ff78fe840ec6c0b3ec709ed01f0ade61522bb2f9a7b86"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/bin/hadris-udf.rs",
+      "sha256": "bc2916e690076d1af90ff78fe840ec6c0b3ec709ed01f0ade61522bb2f9a7b86"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/cat.rs",
+      "sha256": "0a63783ccf6a8dcee917122876e5c705ecb7351323014d6405a3cd17922e889f"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/create.rs",
+      "sha256": "dfb66c70123e7410dc22e851ae27e6a79168441aa049e017f957c0b99d5c9755"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/extract.rs",
+      "sha256": "f8a18530a4dff37e54908901fe230530e32b8ffb6457b8fa8bd76afd996cc156"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/info.rs",
+      "sha256": "9a71698d9d9c980b77d3a4321435f4b21e8ee4425714c9163ce9d2205da92fd3"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/ls.rs",
+      "sha256": "002cebe5234d0f9ba27e2755d9857de81325cd8c0fb6cf20cb442b1436d38477"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/mod.rs",
+      "sha256": "7d79a5b03b5082d38f6868190cf76146eced8614aa6aae799fec5f7eed97977c"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/tree.rs",
+      "sha256": "7795348bcb1ba43f0f39cf52ee26aa0ddb4b59d8b52d516a2d5b48156eb5f0fd"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/src/commands/verify.rs",
+      "sha256": "d007f1fb79aa38324d11f6f20b3f5ee06342fff4c1c329258724025968011646"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/tests/cli_smoke.rs",
+      "sha256": "bf2c875677b0dfaffcd01ca5661f06cc8216590c360f96ec499457175b7f12f6"
+    },
+    {
+      "path": "streaming-src/rust-toolchain.toml",
+      "sha256": "8f8d40d611a1893f155efdbc186cb69f0c7f5e759f08c85dcaf8a681f48d59cb"
+    },
+    {
+      "path": "streaming-src/hadris-udf-2.2.0/Cargo.toml.orig",
+      "sha256": "57eb527d50784d74149a3aaeea2558fc668693e1425fa6e2977bf13081328f08"
+    },
+    {
+      "path": "streaming-src/hadris-udf-cli-2.2.0/Cargo.toml.orig",
+      "sha256": "af5b417c0d40bf3bedb5ab92b564332f0af5c6e9cc3485a5e47d8578a0b880b2"
+    },
+    {
+      "path": "DEPENDENCY-LICENSES.json",
+      "sha256": "3e1e9175a332cf0f4c7dae97271923d19710150719f9be585a1a111c026213af"
+    },
+    {
+      "path": "dependency-licenses/anstream-0.6.18.txt",
+      "sha256": "aaf79c84d1e4ae57a0f94796f00608d006e97a6f39c616e3f43494862f401fad"
+    },
+    {
+      "path": "dependency-licenses/anstyle-1.0.10.txt",
+      "sha256": "a4c555747468c8243fd4a9aba5ad9a17bb33c13692001453246b76ab3cdadc16"
+    },
+    {
+      "path": "dependency-licenses/anstyle-parse-0.2.6.txt",
+      "sha256": "7c578b5b5ba824f235dfead3fa3139150832328921e3bbfbcd52dca2a43661f1"
+    },
+    {
+      "path": "dependency-licenses/anstyle-query-1.1.2.txt",
+      "sha256": "09f3e747eb89cd4ac4a1123ae51470e0d0f0b6f22019abf1c2179289edf00bce"
+    },
+    {
+      "path": "dependency-licenses/anstyle-wincon-3.0.7.txt",
+      "sha256": "049c954c4a12a1c32b79a05c52ff636424cd6a019bf310b485b2c7d6a6ce8988"
+    },
+    {
+      "path": "dependency-licenses/autocfg-1.4.0.txt",
+      "sha256": "209ce175134f8ea787e57b507e14582a1f1a42095ab9572c29330e730c86bfa4"
+    },
+    {
+      "path": "dependency-licenses/bitflags-2.13.1.txt",
+      "sha256": "79b8a93954ef8c381fdfa5c94be3d70dc43f59deef7722dabac48bc8b54e20eb"
+    },
+    {
+      "path": "dependency-licenses/bytemuck-1.25.2.txt",
+      "sha256": "ead9e7b2b886088c48b8fb8bf91619ae565f7081b0f58a49c4a3a3ac1d81da87"
+    },
+    {
+      "path": "dependency-licenses/bytemuck_derive-1.10.2.txt",
+      "sha256": "dcc1eaede332030705f96dbecfc362bba7a43eb27332d6252d216030334e988a"
+    },
+    {
+      "path": "dependency-licenses/byteorder-1.5.0.txt",
+      "sha256": "b08962a0d50227ed76fb081724293886bafba9718ce8039758cb74c227e31746"
+    },
+    {
+      "path": "dependency-licenses/cfg-if-1.0.4.txt",
+      "sha256": "c6adc0472bed8ed7b614bd8aab10db98aa75cf22b2377bac4b2974ac2effa84b"
+    },
+    {
+      "path": "dependency-licenses/chacha20-0.10.1.txt",
+      "sha256": "51703dcf613554eb35052d1555bd8445007821b86a226cb005ac4a2a42a01d73"
+    },
+    {
+      "path": "dependency-licenses/chrono-0.4.45.txt",
+      "sha256": "727f2d2c3c674520a9df638a650c5a1a2324df38ba983c619edf254a54e8c7bc"
+    },
+    {
+      "path": "dependency-licenses/clap-4.5.60.txt",
+      "sha256": "3fbd93b13766b28073442e8d19b8fc8ec57a6d1655eca8fa87844f91113dd861"
+    },
+    {
+      "path": "dependency-licenses/clap_builder-4.5.60.txt",
+      "sha256": "88c3a50c80e9dbef14d79e3077fe4d6e84497a83796a483c1475bb6315da610d"
+    },
+    {
+      "path": "dependency-licenses/clap_derive-4.5.55.txt",
+      "sha256": "5a2fbb94dd556720a23c8beea0e514ff0181caf565a80cf95c8c7bd4951e3300"
+    },
+    {
+      "path": "dependency-licenses/clap_lex-1.1.0.txt",
+      "sha256": "6394867bcaa6b526d19b74816565a7c0350737ba2dfc6805338e2f78748287d3"
+    },
+    {
+      "path": "dependency-licenses/colorchoice-1.0.3.txt",
+      "sha256": "6385e7db1afed1d9f5300b65f2b3a42c784aa6256e396a0254c3a3d551b36c77"
+    },
+    {
+      "path": "dependency-licenses/cpufeatures-0.3.0.txt",
+      "sha256": "8d29b5edc542e90fb82cae8b0c25f246595e03c2bda19f6432a525d70dfddc68"
+    },
+    {
+      "path": "dependency-licenses/crc-3.4.0.txt",
+      "sha256": "e51ed834f035f0b9cd40f937b1d95b05bb49912d692886f82afd498a020e483e"
+    },
+    {
+      "path": "dependency-licenses/crc-catalog-2.4.0.txt",
+      "sha256": "12967d88cd52e68d291b32308111f557decf6573c9f03dc2c5d3edede9037314"
+    },
+    {
+      "path": "dependency-licenses/embedded-io-0.7.1.txt",
+      "sha256": "499b6a6e6ad41121926e98b8ca89027dc876c001981a775a5d88990004c2239f"
+    },
+    {
+      "path": "dependency-licenses/embedded-io-async-0.7.0.txt",
+      "sha256": "d0ee44b59b9c59371054e827f6cd3418356ea64e53cb694b66c851795a963c54"
+    },
+    {
+      "path": "dependency-licenses/getrandom-0.4.3.txt",
+      "sha256": "b66c96e8cacf0d117a3b0dc9fdb3f0375b715c70fc3c209984895b178b0422de"
+    },
+    {
+      "path": "dependency-licenses/hadris-common-2.2.0.txt",
+      "sha256": "18813e624a62518edf41cc7d184e63eeffdad22dd8b0eaf86eb8559b5b66db3c"
+    },
+    {
+      "path": "dependency-licenses/hadris-fixed-2.2.0.txt",
+      "sha256": "f70c483804adad961419575b68880ecda98431b8f4ad43405193bab39ef5a3dd"
+    },
+    {
+      "path": "dependency-licenses/hadris-io-2.2.0.txt",
+      "sha256": "7c16fa61ab8e7077fae99db2529a7d9617e59ee726fa6a996e9d4788589c5ebd"
+    },
+    {
+      "path": "dependency-licenses/hadris-macros-2.2.0.txt",
+      "sha256": "290502e6eb7b5f6706373928ba9c032ef7dd59650868abb0e4a38abef72eb80d"
+    },
+    {
+      "path": "dependency-licenses/hadris-path-2.2.0.txt",
+      "sha256": "0c5ea96915101a57bbd334c7251a9b0d458c1bfe5821ee7cae74a5f7a13cbfb5"
+    },
+    {
+      "path": "dependency-licenses/hadris-udf-2.2.0.txt",
+      "sha256": "2f964bbda6f6d6d9d3233d0aed9817e7f5fad3dcab992b8e467e9df99f445251"
+    },
+    {
+      "path": "dependency-licenses/hadris-udf-cli-2.2.0-bd2hevc.5.txt",
+      "sha256": "d758b32d61366b0b0ec7f23d5457ba4f570b63cdaa86a12f07cff732143c9544"
+    },
+    {
+      "path": "dependency-licenses/hash32-0.3.1.txt",
+      "sha256": "ae8160630abba8039fd9cb713cc0362f4a1468118774cf26a13014f4d695d2e4"
+    },
+    {
+      "path": "dependency-licenses/heapless-0.9.3.txt",
+      "sha256": "4c2b027a7a9b879717dd3ec051c0ad041466bb515903a1da1cfc7317c671ae04"
+    },
+    {
+      "path": "dependency-licenses/heck-0.5.0.txt",
+      "sha256": "550bcab88192e7f4b7d7df3e5b273c58408bc06661f574f333cdb412e7697a46"
+    },
+    {
+      "path": "dependency-licenses/is_terminal_polyfill-1.70.1.txt",
+      "sha256": "5e6ee3e97653cc9fa9835e70ea960829d52e13cbbbdfaacb59bddcd7a33c3c14"
+    },
+    {
+      "path": "dependency-licenses/lazy_static-1.5.0.txt",
+      "sha256": "4b0017c861be7b9841bf0295a61d2a084708f1ba71257d70091eb3b2918dcbbd"
+    },
+    {
+      "path": "dependency-licenses/libc-0.2.186.txt",
+      "sha256": "390b577cb612d1c975142f5a30029d9de6555c0b98e4bb2ffbda959d52699336"
+    },
+    {
+      "path": "dependency-licenses/lock_api-0.4.13.txt",
+      "sha256": "66a50326227971fc4f631d1f6d5b4ae2d1ae4f57494bc8218b999a3b5328b389"
+    },
+    {
+      "path": "dependency-licenses/log-0.4.33.txt",
+      "sha256": "49c8733f4ef80037b77813ab9c650d536450bba2e295cc0c78db8208bfa4aa3e"
+    },
+    {
+      "path": "dependency-licenses/nu-ansi-term-0.50.1.txt",
+      "sha256": "e7433372b647da1cd423d9d5ff4cf2711861198ef6c76c1c6e0a38e6ba504cc6"
+    },
+    {
+      "path": "dependency-licenses/num-traits-0.2.19.txt",
+      "sha256": "0180cc6a3527c21096be2330dc13489b0d5938aab53969c1f80722a3b3a32244"
+    },
+    {
+      "path": "dependency-licenses/once_cell-1.21.3.txt",
+      "sha256": "5e4cc63b876762aa251acb9dec32e4bbd627f86f7daa2cac50c58d6408fe3efc"
+    },
+    {
+      "path": "dependency-licenses/pin-project-lite-0.2.16.txt",
+      "sha256": "d5a59de21b4b3fd5cb6ba8d1f23e2156354cff752f9a5528a23017bafb740028"
+    },
+    {
+      "path": "dependency-licenses/proc-macro2-1.0.107.txt",
+      "sha256": "ae9596251e88f612f820f7e16f9fc8441046ebb807fda2950510290d21708b39"
+    },
+    {
+      "path": "dependency-licenses/quote-1.0.40.txt",
+      "sha256": "cfe48de6d7619e62128f9f2af5a0cdf8c001a49b5914f9ea2159d99e9a4b4298"
+    },
+    {
+      "path": "dependency-licenses/r-efi-6.0.0.txt",
+      "sha256": "ebaf741dc3fd47745fa53f74976b52f42fe533028b00d8898fee17d41b19711f"
+    },
+    {
+      "path": "dependency-licenses/rand-0.10.2.txt",
+      "sha256": "60f63a209581b942291c5e26a33f0c232c7e40e3d1589fa4544639ae7e8605b2"
+    },
+    {
+      "path": "dependency-licenses/rand_core-0.10.1.txt",
+      "sha256": "be2000f2afa88f699ff5cf8448e5a23f95f3608c78035ddad83c32168eb30f5e"
+    },
+    {
+      "path": "dependency-licenses/scopeguard-1.2.0.txt",
+      "sha256": "69a30d80f42f78b9244432b8357765b5bc8d46c37ce86b020bfec77c4679fb1b"
+    },
+    {
+      "path": "dependency-licenses/sharded-slab-0.1.7.txt",
+      "sha256": "45f6973745cb634c3b433239e0abb339c77d22dde407b9fb655aa8c1d6b6d1b2"
+    },
+    {
+      "path": "dependency-licenses/smallvec-1.15.1.txt",
+      "sha256": "13aa55bd7d701d1cce8f3bd38d4fbc7a5eccfc6ebcf41c23007dcf6504de7dab"
+    },
+    {
+      "path": "dependency-licenses/spin-0.12.3.txt",
+      "sha256": "f68b47b49a843713274c683ee6e3f5f4703d80cc8d3a1cdb27f520ed9a167bcb"
+    },
+    {
+      "path": "dependency-licenses/stable_deref_trait-1.2.1.txt",
+      "sha256": "c373f0831085b752a0643ac4bde598c63fbb576c0a1cd1db5d1a02a32b23513b"
+    },
+    {
+      "path": "dependency-licenses/strsim-0.11.1.txt",
+      "sha256": "55deaf9471d210eeb23ae066934cfb0eb0d70b105e363a7051e53342c2bb148e"
+    },
+    {
+      "path": "dependency-licenses/syn-2.0.100.txt",
+      "sha256": "3af043c2ed613c13188604fa17b5e1fbd6c20c296466388bb7a6bd8701d25f4a"
+    },
+    {
+      "path": "dependency-licenses/syn-3.0.3.txt",
+      "sha256": "eb753824994e8f38d139b46222e6cbafff403abcdf28a244ea409d89d925a125"
+    },
+    {
+      "path": "dependency-licenses/thiserror-2.0.20.txt",
+      "sha256": "0a6a40ced530ec6bd61bf4600946c1ae5c04731680dfc724273bb55882d8e438"
+    },
+    {
+      "path": "dependency-licenses/thiserror-impl-2.0.20.txt",
+      "sha256": "13b59fc8cd8855ce574258b8efec6c400e276d7d4b1960a2bef4deb5c16537d6"
+    },
+    {
+      "path": "dependency-licenses/thread_local-1.1.9.txt",
+      "sha256": "c4427de35333ad85783d22117de0eda1d02e3a9d5542b5c230ba63ed2d01f546"
+    },
+    {
+      "path": "dependency-licenses/tracing-0.1.44.txt",
+      "sha256": "d029f1ab6749ca0b7d0497a2e61a7a2fa1c9dcd6e32e24e543dc39ecad60a2e1"
+    },
+    {
+      "path": "dependency-licenses/tracing-attributes-0.1.31.txt",
+      "sha256": "225844c33810266e8849c15745b75b5d9fbbae1efdcc7d206b63ca5c3050f51d"
+    },
+    {
+      "path": "dependency-licenses/tracing-core-0.1.36.txt",
+      "sha256": "22daad9607a50fead9b555f44c634ce708b16adbee8243ce0a677fde9ccb5bf9"
+    },
+    {
+      "path": "dependency-licenses/tracing-log-0.2.0.txt",
+      "sha256": "29d9d808ac58156cebbceb420aa4a6a91d5baadd8a8bed17d2bcd08e2f57ed71"
+    },
+    {
+      "path": "dependency-licenses/tracing-subscriber-0.3.23.txt",
+      "sha256": "12f30b8a42a4a0cb52b3c7c38479e44dd0fbb0de8c4b29e445ab9e9b1b500f3e"
+    },
+    {
+      "path": "dependency-licenses/unicode-ident-1.0.18.txt",
+      "sha256": "36510a54d4cb042b1061f6c134ca19f4b1bb9e4935c4bacad00b2cf6407dec0e"
+    },
+    {
+      "path": "dependency-licenses/utf8parse-0.2.2.txt",
+      "sha256": "294cec2f5c042dd403182b91c3c2b60aabba1fae10cae6950d9341e2611068dd"
+    },
+    {
+      "path": "dependency-licenses/valuable-0.1.1.txt",
+      "sha256": "65c4504517c8ac05782e1afa50377867dcd2f291edec346eb1311d656f73ef97"
+    },
+    {
+      "path": "dependency-licenses/windows-sys-0.52.0.txt",
+      "sha256": "bcc0a2e45ed4dd8285b54ac49238b76df8db4ad05000f1a2bf5b0773ffd240a9"
+    },
+    {
+      "path": "dependency-licenses/windows-sys-0.59.0.txt",
+      "sha256": "36628f1b03352bd2b3a570ac20026030091bd421d92c566b55a35c9d9fa797f3"
+    },
+    {
+      "path": "dependency-licenses/windows-targets-0.52.6.txt",
+      "sha256": "ba5ced8f0a5d7352506ebdc8a7c0d958b3eac91b4935588e5100a56c97182872"
+    },
+    {
+      "path": "dependency-licenses/windows_aarch64_gnullvm-0.52.6.txt",
+      "sha256": "4bf6288f64620a21a2b9b8381f7066c452edd8bb4f4277ef8eca6523f76c03c2"
+    },
+    {
+      "path": "dependency-licenses/windows_aarch64_msvc-0.52.6.txt",
+      "sha256": "6a6e54d9ca92117806851bca4b152aecaf71f33b701fe6aefe4a193ccb697242"
+    },
+    {
+      "path": "dependency-licenses/windows_i686_gnu-0.52.6.txt",
+      "sha256": "10aee86d7c435f8d9a425b7611ff1d6e0732e79c01038b9dec406dbfdd0b4a5b"
+    },
+    {
+      "path": "dependency-licenses/windows_i686_gnullvm-0.52.6.txt",
+      "sha256": "74873c139a748ee16329ad7d7a11cdd2086e983e5eb8898d0299a2551fbe5676"
+    },
+    {
+      "path": "dependency-licenses/windows_i686_msvc-0.52.6.txt",
+      "sha256": "fae5568c6ddf2fe416d9940f8141443e12425d9426014c9ef0e30dcb5c5b0bfd"
+    },
+    {
+      "path": "dependency-licenses/windows_x86_64_gnu-0.52.6.txt",
+      "sha256": "939badd48299200f037b2eafb27bd5c461c5ff72c2dc6a7ba9f3f5aca754fc7d"
+    },
+    {
+      "path": "dependency-licenses/windows_x86_64_gnullvm-0.52.6.txt",
+      "sha256": "ff62721e8fb027d44edaaaaa85c51d5fcab98d3efafc54741bb5928df20f5fe5"
+    },
+    {
+      "path": "dependency-licenses/windows_x86_64_msvc-0.52.6.txt",
+      "sha256": "ccdd020c50f3c4a4b2660b5cf220da393ac685bf1ae73bffcd7674a6f768cb18"
+    },
+    {
+      "path": "dependency-licenses/zerocopy-0.8.56.txt",
+      "sha256": "da3f825ebefbb879401b2da90d7827cdd3888eeb3a88121c48310494a217453a"
+    },
+    {
+      "path": "dependency-licenses/zerocopy-derive-0.8.56.txt",
+      "sha256": "14fbd880ece610977392d4d65680418bd73c835148395528c68b8dc00b80d547"
+    }
+  ],
+  "build_date": "2026-10-05",
+  "compiler_flags": [
+    "--remap-path-prefix=<USERPROFILE>=/build",
+    "--remap-path-prefix=<USERPROFILE_POSIX>=/build"
+  ]
+}

@@ -21,6 +21,23 @@ open-source-release/
 
 # Local external tools and downloaded binaries
 tools/*
+!tools/BD2HEVCLauncher.cs
+!tools/build-gui-icon.py
+!tools/build-gui-launcher.ps1
+!tools/install-gui-shortcut.ps1
+!tools/wb-jukebox/
+!tools/wb-jukebox/*.java
+!tools/wb-jukebox/build.py
+!tools/hadris-udf/
+!tools/hadris-udf/bin/
+!tools/hadris-udf/bin/hadris-udf.exe
+!tools/hadris-udf/README.md
+!tools/hadris-udf/streaming-src/
+!tools/hadris-udf/streaming-src/**
+tools/hadris-udf/streaming-src/**/target/
+tools/hadris-udf/.crates*
+tools/hadris-udf/streaming-src/**/.cargo*
+BD2HEVC.exe
 
 # Disc backups and converted outputs
 Converted UHD-BD/
@@ -42,3 +59,14 @@ samples/
 local-backups/
 local-outputs/
 THE_PRINCESS_BRIDE/
+
+# Generated release/build artifacts
+build/
+dist/
+!tools/build-release.py
+!tools/check-installed.py
+!tools/demo-ui.py
+!tools/make-demo.py
+!tools/check-shared.py
+!tools/check-artifacts.py
+!tools/check-provenance.py

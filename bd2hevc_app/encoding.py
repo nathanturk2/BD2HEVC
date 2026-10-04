@@ -78,7 +78,6 @@ def transcode_compact_audio_tracks(
     outputs: list[dict[str, Any]] = []
     if not audio_streams:
         return outputs, []
-    output_prefix.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         ffmpeg,
         "-hide_banner",
@@ -96,7 +95,6 @@ def transcode_compact_audio_tracks(
         channels = compact_audio_channels(audio)
         bitrate = mono_audio_bitrate if channels == 1 else stereo_audio_bitrate
         output_path = output_prefix.with_name(f"{output_prefix.stem}.audio{index:02d}.ac3")
-        output_path.unlink(missing_ok=True)
         cmd.extend(
             [
                 "-map",
@@ -125,6 +123,7 @@ def transcode_compact_audio_tracks(
             }
         )
     if not dry_run:
+        output_prefix.parent.mkdir(parents=True, exist_ok=True)
         run_cmd(cmd, check=True, capture=False, verbose=verbose)
     return outputs, cmd
 
@@ -188,9 +187,21 @@ def encode_to_hevc_m2ts(
         cmd.extend(["-t", str(sample_seconds)])
     cmd.extend(["-map", "0:v:0"])
     if not video_only:
-        cmd.extend(["-map", "0:a?"])
-        if audio_mode == DEFAULT_AUDIO_MODE:
-            cmd.extend(["-map", "0:s?"])
+        if audio_mode == "compact-stereo":
+            for ordinal, audio in enumerate(clip_info.get("audio") or []):
+                if (safe_int(audio.get("channels")) or 0) > 0:
+                    cmd.extend(["-map", ffmpeg_audio_map_spec(audio, ordinal)])
+        else:
+            cmd.extend(["-map", "0:a?", "-map", "0:s?"])
+    # Keep measured colour information through decoding, filtering and encoding.
+    # An absent source field is not evidence of HDR or a different colour space.
+    for field, option in (("color_primaries", "-color_primaries:v:0"),
+                          ("color_transfer", "-color_trc:v:0"),
+                          ("color_space", "-colorspace:v:0"),
+                          ("color_range", "-color_range:v:0")):
+        value = video.get(field)
+        if value and value not in ("unknown", "unspecified", "reserved"):
+            cmd.extend([option, str(value)])
     filters = []
     postprocess = video.get("postprocess") or {}
     if (postprocess.get("deinterlace") or {}).get("enabled"):
@@ -207,6 +218,16 @@ def encode_to_hevc_m2ts(
         final_hold = safe_float(video.get("sparse_final_hold_seconds"))
         if final_hold and final_hold > 0:
             filters.append(f"tpad=stop_mode=clone:stop_duration={final_hold:.6f}")
+    colour_parameters = []
+    for field, parameter in (("color_primaries", "color_primaries"), ("color_transfer", "color_trc"),
+                             ("color_space", "colorspace"), ("color_range", "range")):
+        value = video.get(field)
+        if value and value not in ("unknown", "unspecified", "reserved"):
+            colour_parameters.append(f"{parameter}={value}")
+    if colour_parameters:
+        # FFmpeg can replace codec-context colour options with frame properties
+        # from the filter graph. Set both so the SPS retains the measured values.
+        filters.append("setparams=" + ":".join(colour_parameters))
     if filters:
         cmd.extend(["-vf", ",".join(filters)])
     if hevc_bit_depth == 8:

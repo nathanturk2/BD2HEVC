@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import json
 import os
-import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -20,7 +19,7 @@ from .config import (
     SPARSE_TIMING_MIN_GAP_SECONDS,
     SPARSE_TIMING_MIN_RATIO,
 )
-from .tools import ToolError, hidden_process_kwargs, require_tool, run_cmd
+from .tools import ToolError, require_tool, run_cmd, run_streaming_cmd
 
 
 def find_disc_roots(paths: list[Path]) -> list[Path]:
@@ -200,7 +199,7 @@ def ffprobe_streams(path: Path, tools: dict[str, Any]) -> dict[str, Any]:
         "-analyzeduration",
         "500M",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,width,height,pix_fmt,field_order,level,refs,has_b_frames,bit_rate,avg_frame_rate,r_frame_rate,start_time,duration,channels,channel_layout,sample_rate:stream_tags=language:format=start_time,duration,bit_rate,size",
+        "stream=id,color_range,color_space,color_transfer,color_primaries,index,codec_type,codec_name,profile,width,height,pix_fmt,field_order,level,refs,has_b_frames,bit_rate,avg_frame_rate,r_frame_rate,start_time,duration,channels,channel_layout,sample_rate:stream_tags=language:format=start_time,duration,bit_rate,size",
         "-of",
         "json",
         str(path),
@@ -327,14 +326,6 @@ def count_start_coded_filler_bytes(
         output_format,
         "-",
     ]
-    process = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **hidden_process_kwargs(),
-    )
-    assert process.stdout is not None
     buffer = b""
     filler_bytes = 0
     filler_units = 0
@@ -366,14 +357,15 @@ def count_start_coded_filler_bytes(
                 filler_units += 1
             buffer = buffer[end:]
 
-    for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
+    def consume_chunk(chunk: bytes) -> None:
+        nonlocal buffer
         buffer += chunk
         consume()
-    stderr_bytes = process.stderr.read() if process.stderr else b""
-    returncode = process.wait()
+
+    result = run_streaming_cmd(cmd, consume_chunk)
     consume(final=True)
-    if returncode != 0:
-        stderr = stderr_bytes.decode(errors="replace")
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="replace")
         raise ToolError(f"Could not scan {output_format} filler data in {path.name}:\n{stderr}")
     return {"padding_bytes": filler_bytes, "padding_units": filler_units}
 
@@ -424,14 +416,6 @@ def count_vc1_stuffing_bytes(path: Path, tools: dict[str, Any], *, video_selecto
         "vc1",
         "-",
     ]
-    process = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        **hidden_process_kwargs(),
-    )
-    assert process.stdout is not None
     pending_zeros = 0
     stuffing_bytes = 0
     stuffing_runs = 0
@@ -482,13 +466,10 @@ def count_vc1_stuffing_bytes(path: Path, tools: dict[str, Any], *, video_selecto
         if final:
             pending_zeros = 0
 
-    for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
-        consume(chunk)
-    stderr_bytes = process.stderr.read() if process.stderr else b""
-    returncode = process.wait()
+    result = run_streaming_cmd(cmd, consume)
     consume(b"", final=True)
-    if returncode != 0:
-        stderr = stderr_bytes.decode(errors="replace")
+    if result.returncode != 0:
+        stderr = result.stderr.decode(errors="replace")
         raise ToolError(f"Could not scan VC-1 stuffing data in {path.name}:\n{stderr}")
     return {"padding_bytes": stuffing_bytes, "padding_units": stuffing_runs, "padding_kind": "vc1_stuffing_bytes"}
 
@@ -801,6 +782,11 @@ def compact_stream(stream: dict[str, Any] | None) -> dict[str, Any]:
     if not stream:
         return {}
     keys = [
+        "id",
+        "color_range",
+        "color_space",
+        "color_transfer",
+        "color_primaries",
         "index",
         "codec_type",
         "codec_name",
@@ -820,6 +806,7 @@ def compact_stream(stream: dict[str, Any] | None) -> dict[str, Any]:
         "channels",
         "channel_layout",
         "sample_rate",
+        "disposition",
     ]
     compact = {k: stream[k] for k in keys if k in stream}
     tags = stream.get("tags") or {}

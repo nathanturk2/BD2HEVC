@@ -36,8 +36,16 @@ def validate_clip(
     decode_seconds: float | None = None,
     require_hevc: str = "over-threshold",
     audio_mode: str = "passthrough",
+    expected_video: dict[str, Any] | None = None,
+    preserve_subtitles: bool = True,
+    preserve_audio: bool = True,
+    preserve_stream_ids: bool = True,
+    expected_duration: float | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"output": str(output_clip), "ok": False, "checks": []}
+    if source_clip is not None and not source_clip.is_file():
+        result["checks"].append({"name":"reference_clip_exists","ok":False,"path":str(source_clip)})
+        return result
     out = inspect_clip(output_clip, tools, accurate_video_bitrate=False)
     result["output_probe"] = out
     video = out.get("video") or {}
@@ -58,6 +66,46 @@ def validate_clip(
         result["checks"].append({"name": "short_clip_allowed", "ok": bool(out.get("ok")), "value": video.get("codec_name"), "duration": duration})
     if source_clip and source_clip.exists():
         src = inspect_clip(source_clip, tools, accurate_video_bitrate=False)
+        result["source_probe"] = src
+        if not preserve_audio:
+            result["checks"].append({"name": "audio_omitted_by_request", "ok": not out.get("audio")})
+            src = {**src, "audio": []}
+        result["checks"].append({"name": "reference_probe_ok", "ok": src.get("ok") is not False})
+        source_subtitles, output_subtitles = src.get("subtitles", []), out.get("subtitles", [])
+        def identity(stream, *, audio=False):
+            fields = ["codec_name", "language"] + (["id"] if preserve_stream_ids else [])
+            if audio: fields += ["channels", "sample_rate", "channel_layout"]
+            values = {key: str(stream[key]).lower() for key in fields if stream.get(key) is not None}
+            if preserve_stream_ids and stream.get("disposition"):
+                values["disposition"] = str(sorted(stream["disposition"].items()))
+            return values
+        def same_streams(original, converted, *, audio=False):
+            return len(original) == len(converted) and all(
+                all(identity(b, audio=audio).get(key) == value for key,value in identity(a, audio=audio).items())
+                for a,b in zip(original, converted))
+        result["checks"].append({"name": "subtitle_inventory_preserved", "ok": same_streams(source_subtitles if preserve_subtitles else [], output_subtitles),
+            "source": [identity(item) for item in source_subtitles], "output": [identity(item) for item in output_subtitles]})
+        if audio_mode == "passthrough":
+            result["checks"].append({
+                "name": "audio_identity_preserved",
+                "ok": same_streams(src.get("audio", []), out.get("audio", []), audio=True),
+                "source": [identity(item, audio=True) for item in src.get("audio", [])],
+                "output": [identity(item, audio=True) for item in out.get("audio", [])],
+            })
+        else:
+            expected_audio = compact_audio_source_streams(src)
+            converted_audio = compact_audio_source_streams(out)
+            result["checks"].append({"name": "audio_languages_preserved", "ok":
+                len(expected_audio) == len(converted_audio) and all(
+                    not a.get("language") or a.get("language") == b.get("language")
+                    for a,b in zip(expected_audio,converted_audio))})
+        expected = expected_video or src.get("video") or {}
+        fields = ("width", "height", "color_space", "color_primaries", "color_transfer", "color_range")
+        for field in fields:
+            value = expected.get(field)
+            if value is not None and str(value).lower() not in {"unknown", "unspecified", "reserved"}:
+                result["checks"].append({"name": "video_" + field + "_matches_plan", "ok": video.get(field) == value,
+                    "expected": value, "actual": video.get(field)})
         src_audio = compact_audio_source_streams(src) if audio_mode == "compact-stereo" else src.get("audio", [])
         out_audio = compact_audio_source_streams(out) if audio_mode == "compact-stereo" else out.get("audio", [])
         if audio_mode == "compact-stereo":
@@ -102,7 +150,7 @@ def validate_clip(
                     "tolerance_seconds": 0.05,
                 }
             )
-        src_duration = safe_float(src.get("duration"))
+        src_duration = safe_float(expected_duration if expected_duration is not None else src.get("duration"))
         out_duration = safe_float(out.get("duration"))
         if src_duration is not None and out_duration is not None and src_duration > SECONDS_REENCODE_THRESHOLD:
             tolerance = duration_match_tolerance(src_duration)

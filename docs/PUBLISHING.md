@@ -1,83 +1,58 @@
-# Publishing BD2HEVC
+# Building and publishing the alpha releases
 
-## GitHub Setup
+The versions are **DVD2HEVC 0.2.0a1** (new default UHD-BD output) and
+**BD2HEVC 0.2.0a2** (the GUI update). Both projects remain independently
+installable. Preparation does not post an announcement, create a GitHub release
+or publish a package.
 
-The public repository currently lives at:
+## Review and build
 
-<https://github.com/nathanturk2/BD2HEVC>
+1. Review the code, documentation, notices and intended public file list.
+   Keep commercial media, captures, work/logs, private reports and external
+   player/tool binaries out. The Windows Hadris author is the deliberate
+   exception: complete fork source, MIT notice and provenance are included.
+2. Use a deliberate public Git author identity and commit the intended source.
+   `python tools/build-release.py --require-clean` exports exact committed
+   bytes into a positive source manifest and builds the source ZIP, wheel and
+   sdist from that export. A build without this flag explicitly records that
+   it includes working-tree changes; do not confuse it with a clean release.
+3. `python tools/check-artifacts.py` checks every exported hash/size, runs the
+   exported-source tests, compiles the Windows launcher, and installs the wheel
+   in a fresh environment outside the checkout. It verifies installed GUI,
+   console/module entry points, resources and per-user state.
+4. Run `tools/check-shared.py` and `tools/check-provenance.py`. DVD includes its
+   native inspector pins, Java source and the Hadris fork inventory; BD includes
+   its Hadris source/binary inventory. Build the bundled/native components from
+   their documented pinned inputs when changing them.
+5. Run `tools/make-demo.py NEW_DIRECTORY --convert` with real tools. DVD's new
+   default uses stock VLC with BD-J and Java, tsMuxeR and Hadris. The private VLC
+   build workflow is only required when testing/distributing the legacy HEVC DVD
+   player. Preserve the receipt and the exact versions/encoder used.
+6. Exercise representative original menus, extras, subtitles, audio, chapters,
+   seeking/resume and shared/branching routes. UHD-BD's 13-disc author corpus
+   is documented separately from the catalogue's 117 legacy converted DVDs.
+   BD's approved catalogue contains 117 converted Blu-ray examples. Neither
+   catalogue claims fresh exhaustive full-film playback certification.
 
-For a new mirror or fork, start from the clean release folder:
+DVD's public UHD-BD limits include ambiguous audio boundaries, whole-title
+decoded continuity, some native chapter/UOP behavior, angle/random playback
+and broader timed visual comparisons. State these clearly. NVENC commercial
+encoding evidence differs from the generated x265 integration run; QSV/AMF
+need their own hardware matrix. Hosted CI is prepared but local checks do not
+prove a remote CI run occurred.
 
-```bash
-git init
-git add .
-git commit -m "Initial BD2HEVC release"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/bd2hevc.git
-git push -u origin main
-```
+## GitHub publication
 
-Then on GitHub:
+The repositories are [DVD2HEVC](https://github.com/nathanturk2/DVD2HEVC) and
+[BD2HEVC](https://github.com/nathanturk2/BD2HEVC). Review the final source revision,
+author identity and artifact SHA-256 values before pushing. These versions use
+`v0.2.0a1` for DVD and `v0.2.0a2` for BD; keep release tags immutable and use a
+new version for a subsequent release. Verify the hosted CI run for that revision.
+Upload matching source ZIPs, wheels/sdists and release notes as alpha prereleases.
 
-1. Create a public repository named `bd2hevc` or `BD2HEVC`.
-2. Add the topics `blu-ray`, `bdmv`, `hevc`, `h265`, `ffmpeg`, `tsmuxer`,
-   `vlc`, `libbluray`, `bd-j`, `nvenc`, `makemkv`, `python`, and
-   `physical-media`.
-3. Enable Issues and Discussions if you want users to report disc compatibility
-   results. The repository includes issue forms and a suggested label set in
-   `.github/labels.yml`.
-4. Confirm the bundled CI workflow passes on GitHub Actions.
-5. Add an alpha release tag when ready:
-
-```bash
-git tag -a v0.1.0-alpha -m "BD2HEVC v0.1.0-alpha"
-git push origin v0.1.0-alpha
-```
-
-## Release Readiness Note
-
-`v0.1.0-alpha` should be presented as an alpha release, but the code structure
-is now reasonable for public development. The major low-level concerns are
-separated into modules: BD-J patching, bitrate planning, encoding, muxing,
-navigation metadata, output repair, progress rendering, queueing, scanning,
-tool discovery, validation, and output handling. The remaining `core` module is
-primarily orchestration and CLI glue.
-
-Do not overpromise disc compatibility. The strongest claim is that the tested
-workflow preserves full-disc menus/extras and has worked across the local test
-set so far, with modular hooks for future VLC/libbluray compatibility fixes.
-
-## Suggested GitHub Description
-
-Full-disc Blu-ray folder backup reencoder: converts video to HEVC/H.265 while
-preserving menus, extras, audio, subtitles, playlists, BD-J, and VLC/libbluray
-folder playback.
-
-## Suggested First Post
-
-Use `docs/REDDIT_ANNOUNCEMENT.md` as the current draft. Keep the first public
-post narrow and careful:
-
-- It works on local, unencrypted BDMV folder backups.
-- It does not decrypt discs, provide keys, or include copyrighted assets.
-- It is for reducing storage while preserving the full-disc menu experience.
-- Ask testers to include OS, GPU, FFmpeg version, tsMuxeR version, command used,
-  and validation output when filing issues.
-
-## Possible Reddit Communities
-
-Read each community's current rules before posting. Avoid anything that sounds
-like a piracy or decryption request.
-
-- `r/DataHoarder`: likely interested in storage reduction, preservation
-  tradeoffs, and long-running conversion workflows.
-- `r/ffmpeg`: good for encoder/rate-control feedback, but keep posts technical
-  and focused on FFmpeg command construction.
-- `r/Bluray`: possibly interested in disc-menu preservation, though rules and
-  tolerance for backup-tool posts may vary.
-- `r/homelab` or `r/selfhosted`: useful only if framing it as a batch archival
-  workflow for personal media libraries.
-
-For Reddit, lead with the technical angle: HEVC reencoding while preserving
-menus/extras and VLC playback. Do not lead with ripping, decryption, or any
-specific commercial disc.
+The README and CHANGELOG describe the public behavior. Keep the GPL license,
+upstream VM attribution and Hadris MIT source/provenance together. External
+VLC/Java/FFmpeg/tsMuxeR binaries are not bundled. A binary distribution of the
+legacy patched VLC needs its own corresponding source/licensing materials.
+Ask reporters for reviewed diagnostic bundles and precise failure routes,
+not media or keys. The separately prepared Reddit draft is not a posted message.
