@@ -1,18 +1,18 @@
 {
-  "schema": "hevc-shared-modules-v1",
+  "schema": "hevc-shared-modules-v2",
   "owner": "Both projects; update both copies and this manifest in one change.",
   "modules": [
     {
       "module": "gui_support.py",
-      "normalized_ast_sha256": "55c4f58fa7b8f494ad29bb1e6c7e015b3b5f7aaf575f85de1b3f27eaf4188ba9"
+      "normalized_ast_sha256": "2c0d663a43f0afb6ca9cb8a262e72d5248d218889032e48bbd4cea1858a12a35"
     },
     {
       "module": "udf_validation.py",
-      "normalized_ast_sha256": "3bd351bf4a6d182b9a61ba7178acece2807eafa459be87a5fb888444dd175578"
+      "normalized_ast_sha256": "b7fc87321147d9a5e5154f46d08138efb175b14d95a870c0f9ffd17a99e7f5f7"
     },
     {
       "module": "runtime_support.py",
-      "normalized_ast_sha256": "0bc40c9dcd4e9d04b88705df9c5946a41ba4b2c24b77156967ee081376fda617"
+      "normalized_ast_sha256": "85c37e78952667fc21931c05c4a127df35bbe899d2e05862aca052b32053e96c"
     }
   ]
 }

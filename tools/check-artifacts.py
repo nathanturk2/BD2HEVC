@@ -33,7 +33,7 @@ def main():
     bd = archive.name.startswith("BD2HEVC-")
     app,command = ("bd2hevc_app","bd2hevc") if bd else ("dvd2hevc_app","dvd2hevc")
     with tempfile.TemporaryDirectory(prefix="hevc-artifact-check-") as temporary:
-        directory = Path(temporary)
+        directory = Path(temporary).resolve()
         log = directory/"checks.log"
         with zipfile.ZipFile(archive) as contents:
             names = contents.namelist()

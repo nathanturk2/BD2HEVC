@@ -6,6 +6,7 @@
 - Preserve secondary audio roles when muxing, including DD+ stream/PID handling.
 - Keep complete failed replacement validation reports outside discarded staging.
 - Retain source/output stream inventories in audio validation diagnostics.
+- Validate Actions workflows, resolve Windows short temporary paths in release checks, and compare shared modules across Python minor versions.
 
 
 ## 0.2.0a1 — Release candidate

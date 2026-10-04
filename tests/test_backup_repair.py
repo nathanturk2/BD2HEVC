@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -148,7 +149,7 @@ class UdfWriterIntegrationTests(unittest.TestCase):
 
     def test_new_writer_and_legacy_repair_preserve_payload(self):
         tool = Path(__file__).resolve().parents[1] / "tools/hadris-udf/bin/hadris-udf.exe"
-        if not tool.exists():
+        if os.name != 'nt' or not tool.exists():
             self.skipTest("Bundled Windows ISO writer is unavailable")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
